@@ -5,5 +5,10 @@ public enum EOperation : ushort
     Punch,
     PunchRes,
     Query,
-    QueryRes
+    QueryRes,
+    Connect,
+    Disconnect,
+    Ping,
+    Pong,
+    Data
 }

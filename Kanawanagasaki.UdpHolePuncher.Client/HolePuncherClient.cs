@@ -5,11 +5,19 @@ using ProtoBuf;
 using System;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
 
 public class HolePuncherClient : IAsyncDisposable
 {
-    public TimeSpan PunchIntervals
+    public delegate void OnRemoteClientConnectedEvent(RemoteClient client);
+    public event OnRemoteClientConnectedEvent? OnRemoteClientConnected;
+    public delegate void OnDataEvent(RemoteClient? client, byte[] data);
+    public event OnDataEvent? OnData;
+    public delegate void OnRemoteClientDisconnectedEvent(RemoteClient client);
+    public event OnRemoteClientDisconnectedEvent? OnRemoteClientDisconnected;
+
+    public TimeSpan TickPeriod
     {
         get => _timer.Period;
         set => _timer.Period = value;
@@ -33,7 +41,10 @@ public class HolePuncherClient : IAsyncDisposable
     private CancellationTokenSource? _receiveCts;
 
     private TaskCompletionSource<QueryRes?>? _queryResTask;
-    private SemaphoreSlim _queryResSemaphore = new(1, 1);
+    private readonly SemaphoreSlim _queryResSemaphore = new(1, 1);
+
+    private readonly HashSet<RemoteClient> _connectedClients = new();
+    public IReadOnlySet<RemoteClient> ConnectedClients => _connectedClients;
 
     public HolePuncherClient(IPEndPoint serverEndPoint)
     {
@@ -51,6 +62,57 @@ public class HolePuncherClient : IAsyncDisposable
 
         _receiveCts = new();
         _receiveTask = Receive();
+    }
+
+    public async Task Connect(RemoteClient client)
+    {
+        _connectedClients.Add(client);
+        OnRemoteClientConnected?.Invoke(client);
+
+        var connect = new ConnectOp { RemoteClient = client };
+
+        var opNum = (ushort)EOperation.Connect;
+
+        using var memory = new MemoryStream();
+        memory.Write([(byte)'K', (byte)'U', (byte)'H', (byte)'P']);
+        memory.WriteByte((byte)(opNum >> 8));
+        memory.WriteByte((byte)(opNum & 0xFF));
+        Serializer.Serialize(memory, connect);
+
+        await UdpClient.SendAsync(memory.ToArray(), _serverEndPoint);
+
+        await Ping(client);
+    }
+
+    public async Task SendTo(RemoteClient client, byte[] data)
+    {
+        if (!_connectedClients.Contains(client))
+            throw new Exception("Client is not connected");
+
+        var opNum = (ushort)EOperation.Data;
+
+        using var memory = new MemoryStream();
+        memory.Write([(byte)'K', (byte)'U', (byte)'H', (byte)'P']);
+        memory.WriteByte((byte)(opNum >> 8));
+        memory.WriteByte((byte)(opNum & 0xFF));
+        memory.Write(data);
+
+        await UdpClient.SendAsync(memory.ToArray(), client.EndPoint);
+    }
+
+    public async Task Disconnect(RemoteClient client)
+    {
+        _connectedClients.Remove(client);
+        OnRemoteClientDisconnected?.Invoke(client);
+
+        var opNum = (ushort)EOperation.Disconnect;
+
+        using var memory = new MemoryStream();
+        memory.Write([(byte)'K', (byte)'U', (byte)'H', (byte)'P']);
+        memory.WriteByte((byte)(opNum >> 8));
+        memory.WriteByte((byte)(opNum & 0xFF));
+
+        await UdpClient.SendAsync(memory.ToArray(), client.EndPoint);
     }
 
     private async Task Tick()
@@ -78,6 +140,9 @@ public class HolePuncherClient : IAsyncDisposable
                 Serializer.Serialize(memory, punch);
 
                 await UdpClient.SendAsync(memory.ToArray(), _serverEndPoint);
+
+                foreach (var remoteClient in _connectedClients)
+                    await Ping(remoteClient);
             }
             while (await _timer.WaitForNextTickAsync(_timerCts.Token));
         }
@@ -161,14 +226,73 @@ public class HolePuncherClient : IAsyncDisposable
                                 _queryResTask.SetResult(queryRes);
                             break;
                         }
+                    case EOperation.Connect:
+                        {
+                            var connect = Serializer.Deserialize<ConnectOp>(bytes[6..].AsMemory());
+                            if (connect is null)
+                                break;
+
+                            _connectedClients.Add(connect.RemoteClient);
+                            OnRemoteClientConnected?.Invoke(connect.RemoteClient);
+
+                            await Ping(connect.RemoteClient);
+
+                            break;
+                        }
+                    case EOperation.Disconnect:
+                        {
+                            var client = _connectedClients.FirstOrDefault(x => x.EndPoint.Equals(receiveRes.RemoteEndPoint));
+                            if (client is null)
+                                break;
+
+                            _connectedClients.Remove(client);
+                            OnRemoteClientDisconnected?.Invoke(client);
+
+                            break;
+                        }
+                    case EOperation.Ping:
+                        {
+                            var opNum = (ushort)EOperation.Pong;
+
+                            using var memory = new MemoryStream();
+                            memory.Write([(byte)'K', (byte)'U', (byte)'H', (byte)'P']);
+                            memory.WriteByte((byte)(opNum << 8));
+                            memory.WriteByte((byte)(opNum & 0xFF));
+
+                            await UdpClient.SendAsync(memory.ToArray(), receiveRes.RemoteEndPoint);
+
+                            break;
+                        }
+                    case EOperation.Data:
+                        {
+                            var client = _connectedClients.FirstOrDefault(x => x.EndPoint.Equals(receiveRes.RemoteEndPoint));
+                            OnData?.Invoke(client, bytes[6..]);
+
+                            break;
+                        }
                 }
             }
         }
         catch { }
     }
 
+    private async Task Ping(RemoteClient client)
+    {
+        var opNum = (ushort)EOperation.Ping;
+
+        using var memory = new MemoryStream();
+        memory.Write([(byte)'K', (byte)'U', (byte)'H', (byte)'P']);
+        memory.WriteByte((byte)(opNum << 8));
+        memory.WriteByte((byte)(opNum & 0xFF));
+
+        await UdpClient.SendAsync(memory.ToArray(), _serverEndPoint);
+    }
+
     public async Task Stop()
     {
+        foreach (var client in _connectedClients.ToArray())
+            await Disconnect(client);
+
         if (_timerTask is not null)
         {
             _timerCts?.Cancel();

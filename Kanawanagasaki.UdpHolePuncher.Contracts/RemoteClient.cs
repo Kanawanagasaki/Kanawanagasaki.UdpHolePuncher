@@ -24,4 +24,10 @@ public class RemoteClient
 
     public override string ToString()
         => $"RemoteClient {string.Join(".", IpBytes ?? [])}:{Port}{(Name is null ? "" : $"\n\tName: {Name}")}\n\tTags: [{string.Join(", ", Tags ?? [])}]\n\tLast Punch: {LastPunch:O}";
+
+    public override bool Equals(object? obj)
+        => obj is RemoteClient other && Enumerable.SequenceEqual(IpBytes ?? [], other.IpBytes ?? []) && Port == other.Port;
+
+    public override int GetHashCode()
+        => (IpBytes?.GetHashCode() ?? 0) ^ Port.GetHashCode();
 }

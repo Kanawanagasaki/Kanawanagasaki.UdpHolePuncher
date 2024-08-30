@@ -50,13 +50,12 @@ while (true)
                     var punch = Serializer.Deserialize<PunchOp>(bytes[6..].AsMemory());
                     if (punch is null)
                         break;
-                    var ipBytes = remoteEndpoint.Address.GetAddressBytes();
-                    var client = clients.FirstOrDefault(x => Enumerable.SequenceEqual(x.IpBytes ?? [], ipBytes) && x.Port == remoteEndpoint.Port);
+                    var client = clients.FirstOrDefault(x => x.EndPoint.Equals(remoteEndpoint));
                     if (client is null)
                     {
                         client = new()
                         {
-                            IpBytes = ipBytes,
+                            IpBytes = remoteEndpoint.Address.GetAddressBytes(),
                             Port = remoteEndpoint.Port,
                             Name = punch.Name,
                             Extra = punch.Extra,
@@ -99,6 +98,27 @@ while (true)
                     Serializer.Serialize(memory, new QueryRes { Clients = queryClients });
 
                     await udpClient.SendAsync(memory.ToArray(), remoteEndpoint);
+                    break;
+                }
+            case EOperation.Connect:
+                {
+                    var connect = Serializer.Deserialize<ConnectOp>(bytes[6..].AsMemory());
+                    if (connect is null)
+                        break;
+
+                    var client = clients.FirstOrDefault(x => x.EndPoint.Equals(remoteEndpoint));
+                    if (client is null)
+                        break;
+
+                    var opNum = (ushort)EOperation.Connect;
+                    using var memory = new MemoryStream();
+                    memory.Write([(byte)'K', (byte)'U', (byte)'H', (byte)'P']);
+                    memory.WriteByte((byte)(opNum >> 8));
+                    memory.WriteByte((byte)(opNum & 0xFF));
+                    Serializer.Serialize(memory, new ConnectOp { RemoteClient = client });
+
+                    await udpClient.SendAsync(memory.ToArray(), connect.RemoteClient.EndPoint);
+                    Console.WriteLine($"Connecting {remoteEndpoint} and {connect.RemoteClient.EndPoint}");
                     break;
                 }
         }
