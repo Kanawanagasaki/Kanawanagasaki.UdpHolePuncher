@@ -12,7 +12,7 @@ public class HolePuncherClient : IAsyncDisposable
 {
     public delegate void OnRemoteClientConnectedEvent(RemoteClient client);
     public event OnRemoteClientConnectedEvent? OnRemoteClientConnected;
-    public delegate void OnDataEvent(RemoteClient? client, byte[] data);
+    public delegate void OnDataEvent(RemoteClient client, byte[] data);
     public event OnDataEvent? OnData;
     public delegate void OnRemoteClientDisconnectedEvent(RemoteClient client);
     public event OnRemoteClientDisconnectedEvent? OnRemoteClientDisconnected;
@@ -23,6 +23,7 @@ public class HolePuncherClient : IAsyncDisposable
         set => _timer.Period = value;
     }
 
+    public string Token { get; }
     public string? Name { get; set; }
     public byte[]? Extra { get; set; }
     public string[] Tags { get; set; } = [];
@@ -46,9 +47,10 @@ public class HolePuncherClient : IAsyncDisposable
     private readonly HashSet<RemoteClient> _connectedClients = new();
     public IReadOnlySet<RemoteClient> ConnectedClients => _connectedClients;
 
-    public HolePuncherClient(IPEndPoint serverEndPoint)
+    public HolePuncherClient(IPEndPoint serverEndPoint, string token)
     {
         _serverEndPoint = serverEndPoint;
+        Token = token;
         UdpClient = new UdpClient()
         {
             ExclusiveAddressUse = false
@@ -69,7 +71,7 @@ public class HolePuncherClient : IAsyncDisposable
         _connectedClients.Add(client);
         OnRemoteClientConnected?.Invoke(client);
 
-        var connect = new ConnectOp { RemoteClient = client };
+        var connect = new ConnectOp { IpBytes = client.IpBytes, Port = client.Port, Token = client.Token };
 
         var opNum = (ushort)EOperation.Connect;
 
@@ -86,8 +88,8 @@ public class HolePuncherClient : IAsyncDisposable
 
     public async Task SendTo(RemoteClient client, byte[] data)
     {
-        if (!_connectedClients.Contains(client))
-            throw new Exception("Client is not connected");
+        if (0x7FFF < data.Length + 6)
+            throw new Exception($"Data exceeded maximum length of {0x7FFF} bytes");
 
         var opNum = (ushort)EOperation.Data;
 
@@ -126,6 +128,7 @@ public class HolePuncherClient : IAsyncDisposable
             {
                 var punch = new PunchOp
                 {
+                    Token = Token,
                     Name = Name,
                     Extra = Extra,
                     Tags = Tags
@@ -157,7 +160,7 @@ public class HolePuncherClient : IAsyncDisposable
 
             _queryResTask = new();
 
-            var query = new QueryOp { Tags = tags };
+            var query = new QueryOp { Token = Token, Tags = tags };
 
             var opNum = (ushort)EOperation.Query;
 
@@ -197,6 +200,8 @@ public class HolePuncherClient : IAsyncDisposable
             {
                 var receiveRes = await UdpClient.ReceiveAsync(_receiveCts.Token);
                 var bytes = receiveRes.Buffer;
+                if (0x7FFF < bytes.Length)
+                    continue;
                 if (bytes.Length < 6)
                     continue;
                 if (bytes[0] != 'K' || bytes[1] != 'U' || bytes[2] != 'H' || bytes[3] != 'P')
@@ -207,7 +212,7 @@ public class HolePuncherClient : IAsyncDisposable
                 {
                     case EOperation.PunchRes:
                         {
-                            PunchRes = Serializer.Deserialize<RemoteClient>(bytes[6..].AsMemory());
+                            PunchRes = Serializer.Deserialize<RemoteClient>(bytes.AsSpan(6));
                             break;
                         }
                     case EOperation.QueryRes:
@@ -215,7 +220,7 @@ public class HolePuncherClient : IAsyncDisposable
                             QueryRes? queryRes;
                             try
                             {
-                                queryRes = Serializer.Deserialize<QueryRes>(bytes[6..].AsMemory());
+                                queryRes = Serializer.Deserialize<QueryRes>(bytes.AsSpan(6));
                             }
                             catch
                             {
@@ -228,14 +233,14 @@ public class HolePuncherClient : IAsyncDisposable
                         }
                     case EOperation.Connect:
                         {
-                            var connect = Serializer.Deserialize<ConnectOp>(bytes[6..].AsMemory());
-                            if (connect is null)
+                            var remoteClient = Serializer.Deserialize<RemoteClient>(bytes.AsSpan(6));
+                            if (remoteClient is null)
                                 break;
 
-                            _connectedClients.Add(connect.RemoteClient);
-                            OnRemoteClientConnected?.Invoke(connect.RemoteClient);
+                            _connectedClients.Add(remoteClient);
+                            OnRemoteClientConnected?.Invoke(remoteClient);
 
-                            await Ping(connect.RemoteClient);
+                            await Ping(remoteClient);
 
                             break;
                         }
@@ -266,7 +271,19 @@ public class HolePuncherClient : IAsyncDisposable
                     case EOperation.Data:
                         {
                             var client = _connectedClients.FirstOrDefault(x => x.EndPoint.Equals(receiveRes.RemoteEndPoint));
-                            OnData?.Invoke(client, bytes[6..]);
+                            if (client is not null)
+                                OnData?.Invoke(client, bytes[6..]);
+                            else
+                            {
+                                var opNum = (ushort)EOperation.Disconnect;
+
+                                using var memory = new MemoryStream();
+                                memory.Write([(byte)'K', (byte)'U', (byte)'H', (byte)'P']);
+                                memory.WriteByte((byte)(opNum >> 8));
+                                memory.WriteByte((byte)(opNum & 0xFF));
+
+                                await UdpClient.SendAsync(memory.ToArray(), receiveRes.RemoteEndPoint);
+                            }
 
                             break;
                         }

@@ -4,13 +4,15 @@ using System.Net;
 using System.Text;
 
 {
+    var ip = IPAddress.Loopback;
+
     Console.WriteLine("Waiting 3 seconds...");
     await Task.Delay(3000);
 
     HolePuncherClient client2;
     HolePuncherClient client3;
     QueryRes? queryRes;
-    await using (var client1 = new HolePuncherClient(new(IPAddress.Loopback, 9999))
+    await using (var client1 = new HolePuncherClient(new(ip, 9999), "test")
     {
         Tags = ["A", "B", "C"],
         Name = "ABC"
@@ -28,7 +30,7 @@ using System.Text;
         Console.WriteLine("Client 1 started");
         await Task.Delay(1000);
 
-        client2 = new HolePuncherClient(new(IPAddress.Loopback, 9999))
+        client2 = new HolePuncherClient(new(ip, 9999), "test")
         {
             Tags = ["Foo", "Bar", "Baz"],
             Name = "Hello, world!",
@@ -45,7 +47,7 @@ using System.Text;
         Console.WriteLine("Client 2 started");
         await Task.Delay(1000);
 
-        client3 = new HolePuncherClient(new(IPAddress.Loopback, 9999));
+        client3 = new HolePuncherClient(new(ip, 9999), "test");
         client3.OnRemoteClientConnected += c =>
         {
             Console.WriteLine($"{c.EndPoint} connected to client 3");
