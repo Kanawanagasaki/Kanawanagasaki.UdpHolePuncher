@@ -302,7 +302,7 @@ public class HolePuncherClient : IAsyncDisposable
         memory.WriteByte((byte)(opNum << 8));
         memory.WriteByte((byte)(opNum & 0xFF));
 
-        await UdpClient.SendAsync(memory.ToArray(), _serverEndPoint);
+        await UdpClient.SendAsync(memory.ToArray(), client.EndPoint);
     }
 
     public async Task Stop()
