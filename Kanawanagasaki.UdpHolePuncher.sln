@@ -9,7 +9,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kanawanagasaki.UdpHolePunch
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kanawanagasaki.UdpHolePuncher.Client", "Kanawanagasaki.UdpHolePuncher.Client\Kanawanagasaki.UdpHolePuncher.Client.csproj", "{F6F116DF-BC06-4815-91E0-A00C733C8F2A}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kanawanagasaki.UdpHolePuncher.Test", "Kanawanagasaki.UdpHolePuncher.Test\Kanawanagasaki.UdpHolePuncher.Test.csproj", "{22990B87-F9C5-484F-A344-4B6D1322A475}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kanawanagasaki.UdpHolePuncher.Sample", "Kanawanagasaki.UdpHolePuncher.Sample\Kanawanagasaki.UdpHolePuncher.Sample.csproj", "{22990B87-F9C5-484F-A344-4B6D1322A475}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

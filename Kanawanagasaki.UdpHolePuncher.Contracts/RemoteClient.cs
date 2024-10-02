@@ -18,14 +18,12 @@ public class RemoteClient
     public byte[]? Extra { get; set; }
     [ProtoMember(6)]
     public required string[]? Tags { get; set; }
-    [ProtoMember(7)]
-    public required DateTime LastPunch { get; set; }
 
     public IPAddress Ip => new IPAddress(IpBytes ?? []);
     public IPEndPoint EndPoint => new IPEndPoint(Ip, Port);
 
     public override string ToString()
-        => $"RemoteClient {string.Join(".", IpBytes ?? [])}:{Port}{(Token is null ? "" : $"\n\tToken: {Token}")}{(Name is null ? "" : $"\n\tName: {Name}")}\n\tTags: [{string.Join(", ", Tags ?? [])}]\n\tLast Punch: {LastPunch:O}";
+        => $"RemoteClient {string.Join(".", IpBytes ?? [])}:{Port}{(Token is null ? "" : $"\n\tToken: {Token}")}{(Name is null ? "" : $"\n\tName: {Name}")}\n\tTags: [{string.Join(", ", Tags ?? [])}]";
 
     public override bool Equals(object? obj)
         => obj is RemoteClient other && Enumerable.SequenceEqual(IpBytes ?? [], other.IpBytes ?? []) && Port == other.Port;

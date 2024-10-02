@@ -7,8 +7,8 @@ public enum EOperation : ushort
     Query,
     QueryRes,
     Connect,
-    Disconnect,
-    Ping,
-    Pong,
+    P2P,
+    Handshake,
+    HandshakeAck,
     Data
 }

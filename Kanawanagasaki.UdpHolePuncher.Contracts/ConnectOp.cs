@@ -10,8 +10,6 @@ public class ConnectOp
     public required byte[]? IpBytes { get; init; }
     [ProtoMember(2)]
     public required int Port { get; init; }
-    [ProtoMember(3)]
-    public string? Token { get; set; }
 
     public IPAddress Ip => new IPAddress(IpBytes ?? []);
     public IPEndPoint EndPoint => new IPEndPoint(Ip, Port);
