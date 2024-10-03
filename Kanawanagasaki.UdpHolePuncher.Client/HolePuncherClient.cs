@@ -17,7 +17,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 
-public class HolePuncherClient : IAsyncDisposable
+public class HolePuncherClient : IDisposable, IAsyncDisposable
 {
     public delegate void OnRemoteClientConnectedEvent(RemoteClient client);
     public event OnRemoteClientConnectedEvent? OnRemoteClientConnected;
@@ -31,6 +31,7 @@ public class HolePuncherClient : IAsyncDisposable
         get => _timer.Period;
         set => _timer.Period = value;
     }
+    public TimeSpan InactiveClientsDisconnectTimeSpan { get; set; } = TimeSpan.FromSeconds(90);
 
     public string Token { get; }
     public string? Name { get; set; }
@@ -51,8 +52,8 @@ public class HolePuncherClient : IAsyncDisposable
     public EConnectionStatus ServerConnectionStatus { get; private set; } = EConnectionStatus.Disconnected;
 
     private readonly PeriodicTimer _timer = new(TimeSpan.FromSeconds(2));
-    private Task? _timerTask;
-    private CancellationTokenSource? _timerCts;
+    private Task? _tickTask;
+    private CancellationTokenSource? _tickCts;
 
     private Task? _receiveTask;
     private CancellationTokenSource? _receiveCts;
@@ -60,7 +61,7 @@ public class HolePuncherClient : IAsyncDisposable
     private TaskCompletionSource<QueryRes?>? _queryResTask;
     private readonly SemaphoreSlim _queryResSemaphore = new(1, 1);
 
-    private readonly ConcurrentDictionary<IPEndPoint, RemoteClient> _toConnect = new();
+    private readonly ConcurrentDictionary<IPEndPoint, (RemoteClient remoteClient, long addedTime)> _toConnect = new();
     private readonly ConcurrentDictionary<IPEndPoint, P2PClient> _connectedClients = new();
     public IEnumerable<RemoteClient> ConnectedClients => _connectedClients.Values.Select(x => x.RemoteClient);
 
@@ -76,10 +77,10 @@ public class HolePuncherClient : IAsyncDisposable
         _allowClientCallback = allowClient;
     }
 
-    public async Task Start()
+    public async Task Start(CancellationToken ct)
     {
         if (ServerConnectionStatus != EConnectionStatus.Disconnected)
-            await Stop();
+            await Stop(ct);
 
         _aesKey = RandomNumberGenerator.GetBytes(32);
         _aesIV = RandomNumberGenerator.GetBytes(12);
@@ -90,13 +91,13 @@ public class HolePuncherClient : IAsyncDisposable
         _receiveCts = new();
         _receiveTask = Receive();
 
-        _timerCts = new();
-        _timerTask = Tick();
+        _tickCts = new();
+        _tickTask = Tick();
     }
 
     public async Task Connect(RemoteClient client, CancellationToken ct)
     {
-        _toConnect.AddOrUpdate(client.EndPoint, client, (_, _) => client);
+        _toConnect.AddOrUpdate(client.EndPoint, (client, Stopwatch.GetTimestamp()), (_, _) => (client, Stopwatch.GetTimestamp()));
 
         var connect = new ConnectOp { IpBytes = client.IpBytes, Port = client.Port };
         await EncryptAndSendOperationToServer(EOperation.Connect, connect, ct);
@@ -186,10 +187,10 @@ public class HolePuncherClient : IAsyncDisposable
             {
                 try
                 {
-                    if (_timerCts is null)
+                    if (_tickCts is null)
                         break;
 
-                    var ct = _timerCts.Token;
+                    var ct = _tickCts.Token;
                     if (ServerConnectionStatus == EConnectionStatus.Handshake)
                     {
                         await SendPacket(_serverEndPoint, EPacketType.RSAPublicKey, ct);
@@ -200,32 +201,46 @@ public class HolePuncherClient : IAsyncDisposable
 
                     await Punch(ct);
 
-                    foreach (var (endpoint, remoteClient) in _toConnect)
+                    foreach (var (endpoint, (remoteClient, timeAdded)) in _toConnect.ToArray())
                     {
-                        var connect = new ConnectOp { IpBytes = remoteClient.IpBytes, Port = remoteClient.Port };
-                        await EncryptAndSendOperationToServer(EOperation.Connect, connect, ct);
-                        await SendPacket(endpoint, EPacketType.Ping, ct);
+                        if (Stopwatch.GetElapsedTime(timeAdded) < InactiveClientsDisconnectTimeSpan)
+                        {
+                            var connect = new ConnectOp { IpBytes = remoteClient.IpBytes, Port = remoteClient.Port };
+                            await EncryptAndSendOperationToServer(EOperation.Connect, connect, ct);
+                            await SendPacket(endpoint, EPacketType.Ping, ct);
+                        }
+                        else
+                            _toConnect.TryRemove(endpoint, out _);
                     }
 
-                    foreach (var (endpoint, p2pClient) in _connectedClients)
+                    foreach (var (endpoint, p2pClient) in _connectedClients.ToArray())
                     {
-                        await SendPacket(endpoint, EPacketType.Ping, ct);
-
-                        if (p2pClient.ConnectionStatus == EConnectionStatus.Handshake)
+                        if (Stopwatch.GetElapsedTime(p2pClient.LastTimePing) < InactiveClientsDisconnectTimeSpan)
                         {
-                            var handshake = new HandshakeOp
-                            {
-                                AesKey = _aesKey,
-                                AesIV = _aesIV,
-                            };
+                            await SendPacket(endpoint, EPacketType.Ping, ct);
 
-                            await EncryptAndSendOperation(p2pClient, EOperation.Handshake, handshake, ct);
+                            if (p2pClient.ConnectionStatus == EConnectionStatus.Handshake)
+                            {
+                                var handshake = new HandshakeOp
+                                {
+                                    AesKey = _aesKey,
+                                    AesIV = _aesIV,
+                                };
+
+                                await EncryptAndSendOperation(p2pClient, EOperation.Handshake, handshake, ct);
+                            }
+                        }
+                        else
+                        {
+                            _connectedClients.TryRemove(endpoint, out _);
+                            await SendPacket(endpoint, EPacketType.Disconnect, ct);
+                            OnRemoteClientDisconnected?.Invoke(p2pClient.RemoteClient);
                         }
                     }
                 }
                 catch (OperationCanceledException) { }
             }
-            while (_timerCts is not null && await _timer.WaitForNextTickAsync(_timerCts.Token));
+            while (_tickCts is not null && await _timer.WaitForNextTickAsync(_tickCts.Token));
         }
         catch (OperationCanceledException) { }
     }
@@ -243,7 +258,7 @@ public class HolePuncherClient : IAsyncDisposable
         await EncryptAndSendOperationToServer(EOperation.Punch, punch, ct);
     }
 
-    public async Task<QueryRes?> Query(string[] tags, TimeSpan timeout, CancellationToken ct)
+    public async Task<QueryRes?> Query(string[]? tags, TimeSpan timeout, CancellationToken ct)
     {
         try
         {
@@ -253,7 +268,7 @@ public class HolePuncherClient : IAsyncDisposable
 
             var query = new QueryOp { Token = Token, Tags = tags };
             await EncryptAndSendOperationToServer(EOperation.Query, query, ct);
-            await Task.WhenAny([_queryResTask.Task, Task.Delay(timeout)]);
+            await Task.WhenAny([_queryResTask.Task, Task.Delay(timeout, ct)]);
 
             var res = _queryResTask.Task.IsCompletedSuccessfully ? await _queryResTask.Task : null;
 
@@ -261,8 +276,11 @@ public class HolePuncherClient : IAsyncDisposable
 
             return res;
         }
-        catch
+        catch (Exception e)
         {
+            Debug.WriteLine(nameof(HolePuncherClient) + " | " + e.Message);
+            Debug.WriteLine(nameof(HolePuncherClient) + " | " + e.StackTrace);
+
             return null;
         }
         finally
@@ -299,13 +317,25 @@ public class HolePuncherClient : IAsyncDisposable
                             await ProcessPacket(remoteEndpoint, decrypted, ct);
                         break;
                     case EPacketType.Ping:
-                        await SendPacket(remoteEndpoint, EPacketType.Pong, ct);
-                        break;
+                        {
+                            await SendPacket(remoteEndpoint, EPacketType.Pong, ct);
+                            if (_connectedClients.TryGetValue(remoteEndpoint, out var p2pClient))
+                                p2pClient.LastTimePing = Stopwatch.GetTimestamp();
+                            break;
+                        }
+                    case EPacketType.Pong:
+                        {
+                            if (_connectedClients.TryGetValue(remoteEndpoint, out var p2pClient))
+                                p2pClient.LastTimePing = Stopwatch.GetTimestamp();
+                            break;
+                        }
                     case EPacketType.Disconnect:
-                        _toConnect.TryRemove(remoteEndpoint, out _);
-                        if (_connectedClients.TryRemove(remoteEndpoint, out var p2pClient))
-                            OnRemoteClientDisconnected?.Invoke(p2pClient.RemoteClient);
-                        break;
+                        {
+                            _toConnect.TryRemove(remoteEndpoint, out _);
+                            if (_connectedClients.TryRemove(remoteEndpoint, out var p2pClient))
+                                OnRemoteClientDisconnected?.Invoke(p2pClient.RemoteClient);
+                            break;
+                        }
                 }
             }
             catch (OperationCanceledException) { }
@@ -392,7 +422,8 @@ public class HolePuncherClient : IAsyncDisposable
 
                     var p2pClient = new P2PClient(p2p.RemoteClient, p2p.AesKey, p2p.AesIV)
                     {
-                        ConnectionStatus = EConnectionStatus.Handshake
+                        ConnectionStatus = EConnectionStatus.Handshake,
+                        LastTimePing = Stopwatch.GetTimestamp()
                     };
                     _connectedClients.AddOrUpdate(p2pClient.EndPoint, p2pClient, (_, _) => p2pClient);
 
@@ -414,7 +445,7 @@ public class HolePuncherClient : IAsyncDisposable
                         break;
                     }
 
-                    if (!_toConnect.TryRemove(endpoint, out var remoteClient))
+                    if (!_toConnect.TryRemove(endpoint, out var toConnect))
                         break;
 
                     var handshake = Serializer.Deserialize<HandshakeOp>(data[2..]);
@@ -424,9 +455,10 @@ public class HolePuncherClient : IAsyncDisposable
                     var p2pClient = _connectedClients.GetValueOrDefault(endpoint);
                     if (p2pClient is null)
                     {
-                        p2pClient = new P2PClient(remoteClient, handshake.AesKey, handshake.AesIV)
+                        p2pClient = new P2PClient(toConnect.remoteClient, handshake.AesKey, handshake.AesIV)
                         {
-                            ConnectionStatus = EConnectionStatus.Connected
+                            ConnectionStatus = EConnectionStatus.Connected,
+                            LastTimePing = Stopwatch.GetTimestamp()
                         };
                         _connectedClients.AddOrUpdate(endpoint, p2pClient, (_, _) => p2pClient);
                         OnRemoteClientConnected?.Invoke(p2pClient.RemoteClient);
@@ -472,20 +504,20 @@ public class HolePuncherClient : IAsyncDisposable
         }
     }
 
-    public async Task Stop()
+    public async Task Stop(CancellationToken ct)
     {
-        await SendPacket(_serverEndPoint, EPacketType.Disconnect, default);
+        await SendPacket(_serverEndPoint, EPacketType.Disconnect, ct);
 
         foreach (var p2p in _connectedClients.Values)
-            await Disconnect(p2p.RemoteClient, default);
+            await Disconnect(p2p.RemoteClient, ct);
 
-        if (_timerTask is not null)
+        if (_tickTask is not null)
         {
-            _timerCts?.Cancel();
-            await _timerTask;
-            _timerCts?.Dispose();
-            _timerTask = null;
-            _timerCts = null;
+            _tickCts?.Cancel();
+            await _tickTask;
+            _tickCts?.Dispose();
+            _tickTask = null;
+            _tickCts = null;
         }
 
         if (_receiveTask is not null)
@@ -497,11 +529,24 @@ public class HolePuncherClient : IAsyncDisposable
             _receiveCts = null;
         }
 
+        PunchResult = null;
         ServerConnectionStatus = EConnectionStatus.Disconnected;
+    }
+
+    public void Dispose()
+    {
+        Stop(default).GetAwaiter().GetResult();
+        UdpClient.Dispose();
     }
 
     public async ValueTask DisposeAsync()
     {
-        await Stop();
+        await Stop(default);
+        UdpClient.Dispose();
+    }
+
+    ~HolePuncherClient()
+    {
+        Dispose();
     }
 }

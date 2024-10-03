@@ -14,6 +14,8 @@ internal class P2PClient
 
     internal EConnectionStatus ConnectionStatus { get; set; } = EConnectionStatus.Disconnected;
 
+    internal long LastTimePing { get; set; } = 0;
+
     internal P2PClient(RemoteClient remoteClient, byte[] aesKey, byte[] aesIV)
     {
         RemoteClient = remoteClient;
