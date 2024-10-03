@@ -72,6 +72,7 @@ public class HolePuncherClient : IAsyncDisposable
         {
             ExclusiveAddressUse = false
         };
+        UdpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
         _allowClientCallback = allowClient;
     }
 
@@ -86,11 +87,11 @@ public class HolePuncherClient : IAsyncDisposable
 
         ServerConnectionStatus = EConnectionStatus.Handshake;
 
-        _timerCts = new();
-        _timerTask = Tick();
-
         _receiveCts = new();
         _receiveTask = Receive();
+
+        _timerCts = new();
+        _timerTask = Tick();
     }
 
     public async Task Connect(RemoteClient client, CancellationToken ct)
@@ -104,8 +105,6 @@ public class HolePuncherClient : IAsyncDisposable
 
     private async Task SendPacket(IPEndPoint endpoint, EPacketType packetType, CancellationToken ct)
     {
-        Debug.WriteLine($"CLIENT {UdpClient.Client.LocalEndPoint} | Sending packet of type {packetType} without data to {endpoint}");
-
         byte[] payload = [(byte)packetType];
         await UdpClient.SendAsync(payload, endpoint, ct);
     }
@@ -113,7 +112,6 @@ public class HolePuncherClient : IAsyncDisposable
     private async Task SendPacket(IPEndPoint endpoint, EPacketType packetType, ReadOnlyMemory<byte> data, CancellationToken ct)
     {
         byte[] payload = [(byte)packetType, .. data.Span];
-        Debug.WriteLine($"CLIENT {UdpClient.Client.LocalEndPoint} | Sending packet of type {packetType} of size {payload.Length} to {endpoint}");
         await UdpClient.SendAsync(payload, endpoint, ct);
     }
 
@@ -121,8 +119,6 @@ public class HolePuncherClient : IAsyncDisposable
     {
         if (_aesKey is null || _aesIV is null || _aes is null)
             return Task.CompletedTask;
-
-        Debug.WriteLine($"CLIENT {UdpClient.Client.LocalEndPoint} | Encrypting and sending operation {op} with payload {payload.GetType().Name} to the server");
 
         using var memory = new MemoryStream();
 
@@ -140,8 +136,6 @@ public class HolePuncherClient : IAsyncDisposable
 
     private Task EncryptAndSendOperation(P2PClient p2p, EOperation op, CancellationToken ct)
     {
-        Debug.WriteLine($"CLIENT {UdpClient.Client.LocalEndPoint} | Encrypting and sending operation {op} without payload to {p2p.RemoteClient?.Name}@{p2p.EndPoint}");
-
         var opNum = (ushort)op;
         var data = new byte[] { (byte)(opNum >> 8), (byte)(opNum & 0xFF) };
         var encrypted = new byte[18].AsMemory();
@@ -152,8 +146,6 @@ public class HolePuncherClient : IAsyncDisposable
 
     private async Task EncryptAndSendOperation<T>(P2PClient p2p, EOperation op, T payload, CancellationToken ct) where T : class
     {
-        Debug.WriteLine($"CLIENT {UdpClient.Client.LocalEndPoint} | Encrypting and sending operation {op} with payload {payload.GetType().Name} to {p2p.RemoteClient?.Name}@{p2p.EndPoint}");
-
         using var memory = new MemoryStream();
 
         var opNum = (ushort)op;
@@ -170,12 +162,8 @@ public class HolePuncherClient : IAsyncDisposable
 
     public async Task SendTo(RemoteClient client, byte[] data, CancellationToken ct)
     {
-        if (1024 < data.Length + 2 + 16 + 1)
-            throw new Exception($"Data exceeded maximum length of {1024 - 2 - 16 - 1} bytes");
         if (!_connectedClients.TryGetValue(client.EndPoint, out var p2p))
             return;
-
-        Debug.WriteLine($"CLIENT {UdpClient.Client.LocalEndPoint} | Sending data of size {data.Length} bytes to {client.Name}@{client.EndPoint}");
 
         var opNum = (ushort)EOperation.Data;
 
@@ -210,15 +198,7 @@ public class HolePuncherClient : IAsyncDisposable
                     else if (ServerConnectionStatus != EConnectionStatus.Connected)
                         continue;
 
-                    var punch = new PunchOp
-                    {
-                        Token = Token,
-                        Name = Name,
-                        Extra = Extra,
-                        Tags = Tags
-                    };
-
-                    await EncryptAndSendOperationToServer(EOperation.Punch, punch, ct);
+                    await Punch(ct);
 
                     foreach (var (endpoint, remoteClient) in _toConnect)
                     {
@@ -248,6 +228,19 @@ public class HolePuncherClient : IAsyncDisposable
             while (_timerCts is not null && await _timer.WaitForNextTickAsync(_timerCts.Token));
         }
         catch (OperationCanceledException) { }
+    }
+
+    private async Task Punch(CancellationToken ct)
+    {
+        var punch = new PunchOp
+        {
+            Token = Token,
+            Name = Name,
+            Extra = Extra,
+            Tags = Tags
+        };
+
+        await EncryptAndSendOperationToServer(EOperation.Punch, punch, ct);
     }
 
     public async Task<QueryRes?> Query(string[] tags, TimeSpan timeout, CancellationToken ct)
@@ -292,8 +285,6 @@ public class HolePuncherClient : IAsyncDisposable
                 var memoryBytes = receiveRes.Buffer.AsMemory();
                 var remoteEndpoint = receiveRes.RemoteEndPoint;
 
-                Debug.WriteLine($"CLIENT {UdpClient.Client.LocalEndPoint} | Received packet of type {(EPacketType)receiveRes.Buffer[0]} of size {memoryBytes.Length} from {remoteEndpoint}");
-
                 switch ((EPacketType)receiveRes.Buffer[0])
                 {
                     case EPacketType.RSAPublicKey:
@@ -301,6 +292,7 @@ public class HolePuncherClient : IAsyncDisposable
                         break;
                     case EPacketType.HandshakeComplete:
                         ServerConnectionStatus = EConnectionStatus.Connected;
+                        await Punch(ct);
                         break;
                     case EPacketType.AESEncryptedData:
                         if (TryDecrypt(memoryBytes[1..], out var decrypted))
@@ -363,8 +355,6 @@ public class HolePuncherClient : IAsyncDisposable
 
         var op = (EOperation)((data.Span[0] << 8) | data.Span[1]);
 
-        Debug.WriteLine($"CLIENT {UdpClient.Client.LocalEndPoint} | Processing packet of operation {op} of size {data.Length} from {endpoint}");
-
         switch (op)
         {
             case EOperation.PunchRes:
@@ -418,7 +408,13 @@ public class HolePuncherClient : IAsyncDisposable
                 }
             case EOperation.Handshake:
                 {
-                    if (!_toConnect.TryGetValue(endpoint, out var remoteClient))
+                    if (_connectedClients.TryGetValue(endpoint, out var connectedP2PClient))
+                    {
+                        await EncryptAndSendOperation(connectedP2PClient, EOperation.HandshakeAck, ct);
+                        break;
+                    }
+
+                    if (!_toConnect.TryRemove(endpoint, out var remoteClient))
                         break;
 
                     var handshake = Serializer.Deserialize<HandshakeOp>(data[2..]);

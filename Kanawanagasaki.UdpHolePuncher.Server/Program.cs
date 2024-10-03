@@ -52,8 +52,6 @@ async Task Receive(CancellationToken ct)
             var client = Clients.GetClientByEndpoint(remoteEndpoint);
             Clients.UpdateClientTime(client);
 
-            Debug.WriteLine($"SERVER | Received datagram of size {receiveRes.Buffer.Length} bytes, of type {(EPacketType)receiveRes.Buffer[0]} from {remoteEndpoint}");
-
             switch ((EPacketType)receiveRes.Buffer[0])
             {
                 case EPacketType.RSAPublicKey:
@@ -109,14 +107,11 @@ async Task ClearClients(CancellationToken ct)
 async Task SendPacket(IPEndPoint endpoint, EPacketType packetType, ReadOnlyMemory<byte> data, CancellationToken ct)
 {
     byte[] payload = [(byte)packetType, .. data.Span];
-    Debug.WriteLine($"SERVER | Sending packet of size {payload.Length} bytes, of type {packetType} to {endpoint}");
     await udpClient.SendAsync(payload, endpoint, ct);
 }
 
 async Task SendPacketNoData(IPEndPoint endpoint, EPacketType packetType, CancellationToken ct)
 {
-    Debug.WriteLine($"SERVER | Sending packet without data of type {packetType} to {endpoint}");
-
     byte[] payload = [(byte)packetType];
     await udpClient.SendAsync(payload, endpoint, ct);
 }
@@ -130,8 +125,6 @@ async Task EncryptAndSendOperation<T>(Client client, EOperation op, T payload, C
         return;
     if (client.Aes is null)
         client.Aes = new(client.AesKey, 16);
-
-    Debug.WriteLine($"SERVER | Encrypting and sending operation {op} with payload {payload.GetType().Name} to {client.RemoteClient?.Name}@{client.Endpoint}");
 
     using var memory = new MemoryStream();
 
@@ -149,8 +142,6 @@ async Task EncryptAndSendOperation<T>(Client client, EOperation op, T payload, C
 
 async Task DecryptAndSaveAesKey(Client client, byte[] data, CancellationToken ct)
 {
-    Debug.WriteLine($"SERVER | Decrypting {client.RemoteClient?.Name}@{client.Endpoint}'s AES key");
-
     var aesKeyIV = decryptEngine.ProcessBlock(data, 0, data.Length);
 
     if (client.Aes is not null)
@@ -165,8 +156,6 @@ async Task DecryptAndSaveAesKey(Client client, byte[] data, CancellationToken ct
     client.AesKey = aesKeyIV[..^12];
     client.AesIV = aesKeyIV[^12..];
     client.Aes = new(client.AesKey, 16);
-
-    Debug.WriteLine($"SERVER | {client.RemoteClient?.Name}@{client.Endpoint}'s AES key decrypted");
 
     await SendPacketNoData(client.Endpoint, EPacketType.HandshakeComplete, ct);
 
@@ -193,13 +182,11 @@ bool TryDecrypt(Client client, ReadOnlyMemory<byte> data, out Memory<byte> decry
 
 Task ProcessPacket(Client client, ReadOnlyMemory<byte> data, CancellationToken ct)
 {
-    if (data.Length < 3)
+    if (data.Length < 2)
         return Task.CompletedTask;
 
     var span = data.Span;
     var op = (EOperation)((span[0] << 8) | span[1]);
-
-    Debug.WriteLine($"SERVER | Processing packet from {client.RemoteClient?.Name} of size {data.Length}, of operation {op}");
 
     switch (op)
     {
@@ -248,7 +235,6 @@ async Task Punch(Client client, ReadOnlyMemory<byte> data, CancellationToken ct)
         client.RemoteClient.Tags = punch.Tags;
     }
 
-    Debug.WriteLine($"SERVER | Got punch from {client.RemoteClient.Name}@{client.Endpoint}");
 
     await EncryptAndSendOperation(client, EOperation.PunchRes, client.RemoteClient, ct);
 }
@@ -258,8 +244,6 @@ async Task Query(Client client, ReadOnlyMemory<byte> data, CancellationToken ct)
     var query = Serializer.Deserialize<QueryOp>(data);
     if (query is null)
         return;
-
-    Debug.WriteLine($"SERVER | Got query from {client.RemoteClient?.Name}@{client.Endpoint} looking for {query.Token} token and {string.Join(",", query.Tags ?? [])} tags");
 
     var group = Clients.GetGroupByToken(query.Token ?? string.Empty);
 
@@ -293,7 +277,6 @@ async Task ConnectRemoteClients(Client client, ReadOnlyMemory<byte> data, Cancel
         AesIV = client.AesIV
     };
 
-    Debug.WriteLine($"SERVER | Connecting {client.RemoteClient.Name}@{client.Endpoint} to {clientToConnect.RemoteClient.Name}@{clientToConnect.Endpoint}");
     Console.WriteLine($"Connecting {client.RemoteClient.Name}@{client.Endpoint} to {clientToConnect.RemoteClient.Name}@{clientToConnect.Endpoint}");
 
     await EncryptAndSendOperation(clientToConnect, EOperation.P2P, p2p, ct);

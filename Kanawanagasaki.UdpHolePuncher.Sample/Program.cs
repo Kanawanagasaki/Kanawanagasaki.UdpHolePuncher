@@ -3,6 +3,7 @@ using Kanawanagasaki.UdpHolePuncher.Contracts;
 using System.Net;
 using System.Text;
 
+HolePuncherClient client3;
 {
     var ip = IPAddress.Loopback;
     Console.WriteLine($"Hostname resolved to {ip} ip address");
@@ -10,8 +11,6 @@ using System.Text;
     Console.WriteLine("Waiting 3 seconds...");
     await Task.Delay(3000);
 
-    HolePuncherClient client2;
-    HolePuncherClient client3;
     QueryRes? queryRes;
     await using (var client1 = new HolePuncherClient(new(ip, 9999), "test", _ => true)
     {
@@ -30,7 +29,7 @@ using System.Text;
         Console.WriteLine("Client 1 started");
         await Task.Delay(1000);
 
-        client2 = new HolePuncherClient(new(ip, 9999), "test", _ => true)
+        await using var client2 = new HolePuncherClient(new(ip, 9999), "test", _ => true)
         {
             Tags = ["Foo", "Bar", "Baz"],
             Name = "Hello, world!",
@@ -67,6 +66,9 @@ using System.Text;
             await Task.Delay(1000);
 
         Console.WriteLine("All 3 clients punched their way through");
+        Console.WriteLine($"Client 1 is {client1.PunchResult.Name}@{client1.PunchResult.EndPoint}");
+        Console.WriteLine($"Client 2 is {client2.PunchResult.Name}@{client2.PunchResult.EndPoint}");
+        Console.WriteLine($"Client 3 is {client3.PunchResult.Name}@{client3.PunchResult.EndPoint}");
 
         queryRes = await client1.Query([], TimeSpan.FromSeconds(10), default);
         if (queryRes?.Clients is null)
@@ -80,6 +82,10 @@ using System.Text;
                     Console.WriteLine("Extra: " + Encoding.UTF8.GetString(client.Extra));
             }
 
+            Console.Write("10 seconds wait...");
+            await Task.Delay(10000);
+            Console.WriteLine("\r                       ");
+
             var toSendTo = queryRes.Clients.FirstOrDefault(x => !x.Equals(client1.PunchResult));
             if (toSendTo is not null)
             {
@@ -87,10 +93,17 @@ using System.Text;
                 Console.WriteLine($"Client 1 is connecting to {toSendTo.Name}@{toSendTo.EndPoint}");
                 while (!client1.ConnectedClients.Any(x => x.Equals(toSendTo)))
                     await Task.Delay(1000);
+
+                Console.WriteLine("10 seconds wait...");
+                await Task.Delay(10000);
+
                 await client1.SendTo(toSendTo, Encoding.UTF8.GetBytes("This is THE message"), default);
                 Console.WriteLine($"Client 1 sent data to {toSendTo.Name}@{toSendTo.EndPoint}");
             }
         }
+
+        Console.WriteLine("10 seconds wait...");
+        await Task.Delay(10000);
 
         await client1.Stop();
         Console.WriteLine("Client 1 stopped");
@@ -127,7 +140,6 @@ using System.Text;
         }
     }
     Console.WriteLine("Client 1 dispossed");
-    await client2.DisposeAsync();
     Console.WriteLine("Client 2 dispossed");
 
     await Task.Delay(5000);
@@ -146,6 +158,7 @@ using System.Text;
         }
     }
 }
+await client3.DisposeAsync();
 Console.WriteLine("Client 3 dispossed");
 
 Console.WriteLine("""
