@@ -175,7 +175,7 @@ public class HolePuncherClient : IDisposable, IAsyncDisposable
 
         var encrypted = new byte[memory.Length + 16].AsMemory();
         p2p.Aes.Encrypt(p2p.AesIV, memory.ToArray(), encrypted[..^16].Span, encrypted[^16..].Span);
-
+        
         await SendPacket(p2p.EndPoint, EPacketType.AESEncryptedData, encrypted, ct);
     }
 
@@ -297,7 +297,7 @@ public class HolePuncherClient : IDisposable, IAsyncDisposable
             try
             {
                 var receiveRes = await UdpClient.ReceiveAsync(ct);
-                if (receiveRes.Buffer.Length < 1 || 1024 < receiveRes.Buffer.Length)
+                if (receiveRes.Buffer.Length < 1)
                     continue;
 
                 var memoryBytes = receiveRes.Buffer.AsMemory();

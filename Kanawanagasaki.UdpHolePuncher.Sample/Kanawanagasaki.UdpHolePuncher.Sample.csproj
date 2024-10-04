@@ -1,14 +1,16 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-  </PropertyGroup>
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net8.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<StartupObject>Kanawanagasaki.UdpHolePuncher.Sample.Rudp</StartupObject>
+	</PropertyGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="..\Kanawanagasaki.UdpHolePuncher.Client\Kanawanagasaki.UdpHolePuncher.Client.csproj" />
-  </ItemGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\Kanawanagasaki.RUDP\Kanawanagasaki.RUDP.csproj" />
+		<ProjectReference Include="..\Kanawanagasaki.UdpHolePuncher.Client\Kanawanagasaki.UdpHolePuncher.Client.csproj" />
+	</ItemGroup>
 
 </Project>
