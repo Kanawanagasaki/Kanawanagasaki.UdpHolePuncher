@@ -17,7 +17,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 
-public class HolePuncherClient : IDisposable, IAsyncDisposable
+public class HolePuncherClient : IAsyncDisposable
 {
     public delegate void OnRemoteClientConnectedEvent(RemoteClient client);
     public event OnRemoteClientConnectedEvent? OnRemoteClientConnected;
@@ -175,7 +175,7 @@ public class HolePuncherClient : IDisposable, IAsyncDisposable
 
         var encrypted = new byte[memory.Length + 16].AsMemory();
         p2p.Aes.Encrypt(p2p.AesIV, memory.ToArray(), encrypted[..^16].Span, encrypted[^16..].Span);
-        
+
         await SendPacket(p2p.EndPoint, EPacketType.AESEncryptedData, encrypted, ct);
     }
 
@@ -497,6 +497,8 @@ public class HolePuncherClient : IDisposable, IAsyncDisposable
 
     public async Task Disconnect(RemoteClient client, CancellationToken ct)
     {
+        _toConnect.TryRemove(client.EndPoint, out _);
+
         if (_connectedClients.TryRemove(client.EndPoint, out var p2pClient))
         {
             await SendPacket(p2pClient.EndPoint, EPacketType.Disconnect, ct);
@@ -533,20 +535,9 @@ public class HolePuncherClient : IDisposable, IAsyncDisposable
         ServerConnectionStatus = EConnectionStatus.Disconnected;
     }
 
-    public void Dispose()
-    {
-        Stop(default).GetAwaiter().GetResult();
-        UdpClient.Dispose();
-    }
-
     public async ValueTask DisposeAsync()
     {
         await Stop(default);
         UdpClient.Dispose();
-    }
-
-    ~HolePuncherClient()
-    {
-        Dispose();
     }
 }

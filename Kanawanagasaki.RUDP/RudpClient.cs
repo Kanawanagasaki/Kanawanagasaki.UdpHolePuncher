@@ -8,12 +8,12 @@ using System.Diagnostics;
 using System.Text;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 
-public class RudpClient : IDisposable, IAsyncDisposable
+public class RudpClient : IAsyncDisposable
 {
     public HolePuncherClient HolePuncher { get; }
     public RemoteClient RemoteClient { get; }
 
-    public delegate void OnDatagramEvent(ReadOnlyMemory<byte> data);
+    public delegate void OnDatagramEvent(RudpClient rudpClient, ReadOnlyMemory<byte> data);
     public event OnDatagramEvent? OnDatagram;
 
     private ConcurrentQueue<byte[]> _stream = new();
@@ -69,7 +69,7 @@ public class RudpClient : IDisposable, IAsyncDisposable
 
         var dataType = (EDataType)data[0];
         if (dataType.HasFlag(EDataType.Datagram))
-            OnDatagram?.Invoke(data.AsMemory(1));
+            OnDatagram?.Invoke(this, data.AsMemory(1));
         else if (dataType.HasFlag(EDataType.ReliableDatagram))
         {
             var id = (uint)((data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4]);
@@ -85,7 +85,7 @@ public class RudpClient : IDisposable, IAsyncDisposable
                     if (dataType.HasFlag(EDataType.Stream))
                         HandleStream(id, data.AsMemory(5));
                     else
-                        OnDatagram?.Invoke(data.AsMemory(5));
+                        OnDatagram?.Invoke(this, data.AsMemory(5));
                 }
                 else if (_missingReliablePacketIds.Contains(id))
                 {
@@ -94,7 +94,7 @@ public class RudpClient : IDisposable, IAsyncDisposable
                     if (dataType.HasFlag(EDataType.Stream))
                         HandleStream(id, data.AsMemory(5));
                     else
-                        OnDatagram?.Invoke(data.AsMemory(5));
+                        OnDatagram?.Invoke(this, data.AsMemory(5));
                 }
             }
 
@@ -141,6 +141,9 @@ public class RudpClient : IDisposable, IAsyncDisposable
 
     public async Task<int> ReadAsync(byte[] buffer, CancellationToken ct)
     {
+        if (buffer.Length == 0)
+            return 0;
+
         while (!ct.IsCancellationRequested)
         {
             if (_stream.TryPeek(out var chunk))
@@ -256,13 +259,5 @@ public class RudpClient : IDisposable, IAsyncDisposable
             _streamDataAvailable.SetResult();
 
         _streamSemaphore.Dispose();
-    }
-
-    public void Dispose()
-        => DisposeAsync().GetAwaiter().GetResult();
-
-    ~RudpClient()
-    {
-        Dispose();
     }
 }
