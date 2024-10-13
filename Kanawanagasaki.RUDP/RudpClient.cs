@@ -5,8 +5,6 @@ using Kanawanagasaki.UdpHolePuncher.Contracts;
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Text;
-using static System.Runtime.InteropServices.JavaScript.JSType;
 
 public class RudpClient : IAsyncDisposable
 {
@@ -19,17 +17,18 @@ public class RudpClient : IAsyncDisposable
     private ConcurrentQueue<byte[]> _stream = new();
     private ConcurrentDictionary<uint, byte[]> _streamOutOfOrderChunks = new();
     private TaskCompletionSource? _streamDataAvailable;
+    private object _streamDataAvailableLock = new();
     private int _streamChunkOffset = 0;
     private uint _streamOutgoingOrder = 0;
     private uint _streamIncomingOrder = 0;
     private SemaphoreSlim _streamSemaphore = new(1, 1);
 
     private ConcurrentDictionary<uint, (long time, byte[] packet)> _reliablePackets = new();
+    private ConcurrentQueue<(uint id, byte[] packet)> _reliablePacketsBuffer = new();
 
     private uint _outgoingReliablePacketId = 0;
     private uint _lastIncomingReliablePacketId = 0;
     private HashSet<uint> _missingReliablePacketIds = new();
-    private object _reliablePacketsLock = new();
 
     public bool HasMissingReliableDatagrams => 0 < _missingReliablePacketIds.Count;
 
@@ -74,36 +73,35 @@ public class RudpClient : IAsyncDisposable
         {
             var id = (uint)((data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4]);
 
-            lock (_reliablePacketsLock)
+            if (_lastIncomingReliablePacketId < id)
             {
-                if (_lastIncomingReliablePacketId < id)
-                {
-                    for (uint i = _lastIncomingReliablePacketId + 1; i < id; i++)
-                        _missingReliablePacketIds.Add(i);
-                    _lastIncomingReliablePacketId = id;
+                for (uint i = _lastIncomingReliablePacketId + 1; i < id; i++)
+                    _missingReliablePacketIds.Add(i);
+                _lastIncomingReliablePacketId = id;
 
-                    if (dataType.HasFlag(EDataType.Stream))
-                        HandleStream(id, data.AsMemory(5));
-                    else
-                        OnDatagram?.Invoke(this, data.AsMemory(5));
-                }
-                else if (_missingReliablePacketIds.Contains(id))
-                {
-                    _missingReliablePacketIds.Remove(id);
+                if (dataType.HasFlag(EDataType.Stream))
+                    HandleStream(id, data.AsMemory(5));
+                else
+                    OnDatagram?.Invoke(this, data.AsMemory(5));
+            }
+            else if (_missingReliablePacketIds.Contains(id))
+            {
+                _missingReliablePacketIds.Remove(id);
 
-                    if (dataType.HasFlag(EDataType.Stream))
-                        HandleStream(id, data.AsMemory(5));
-                    else
-                        OnDatagram?.Invoke(this, data.AsMemory(5));
-                }
+                if (dataType.HasFlag(EDataType.Stream))
+                    HandleStream(id, data.AsMemory(5));
+                else
+                    OnDatagram?.Invoke(this, data.AsMemory(5));
             }
 
-            Task.Run(() => SendDatagramInternalAsync(EDataType.ReliableDatagramAck, data[1..5], default));
+            _ = SendDatagramInternalAsync(EDataType.ReliableDatagramAck, data[1..5], default);
         }
         else if (dataType.HasFlag(EDataType.ReliableDatagramAck))
         {
             var id = (uint)((data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4]);
             _reliablePackets.TryRemove(id, out _);
+            if (_reliablePackets.Count < 8)
+                _ = DrainReliablePacketsBufferAsync(default);
         }
     }
 
@@ -135,41 +133,49 @@ public class RudpClient : IAsyncDisposable
             dataAvailable = true;
         }
 
-        if (dataAvailable)
-            _streamDataAvailable?.SetResult();
+        lock (_streamDataAvailableLock)
+        {
+            if (dataAvailable && _streamDataAvailable is not null && !_streamDataAvailable.Task.IsCompleted)
+                _streamDataAvailable.SetResult();
+        }
     }
 
-    public async Task<int> ReadAsync(byte[] buffer, CancellationToken ct)
+    public async Task<int> ReadAsync(Memory<byte> buffer, CancellationToken ct)
     {
         if (buffer.Length == 0)
             return 0;
 
         while (!ct.IsCancellationRequested)
         {
-            if (_stream.TryPeek(out var chunk))
+            Task dataAvailableTask;
+            lock (_streamDataAvailableLock)
             {
-                if (chunk.Length - _streamChunkOffset <= buffer.Length)
+                if (_stream.TryPeek(out var chunk))
                 {
-                    var read = chunk.Length - _streamChunkOffset;
-                    Buffer.BlockCopy(chunk, _streamChunkOffset, buffer, 0, read);
-                    _stream.TryDequeue(out _);
-                    _streamChunkOffset = 0;
-                    return read;
+                    if (chunk.Length - _streamChunkOffset <= buffer.Length)
+                    {
+                        var read = chunk.Length - _streamChunkOffset;
+                        chunk.AsMemory(_streamChunkOffset, read).CopyTo(buffer);
+                        _stream.TryDequeue(out _);
+                        _streamChunkOffset = 0;
+                        return read;
+                    }
+                    else
+                    {
+                        chunk.AsMemory(_streamChunkOffset, buffer.Length).CopyTo(buffer);
+                        _streamChunkOffset += buffer.Length;
+                        return buffer.Length;
+                    }
                 }
-                else
-                {
-                    Buffer.BlockCopy(chunk, _streamChunkOffset, buffer, 0, buffer.Length);
-                    _streamChunkOffset += buffer.Length;
-                    return buffer.Length;
-                }
+
+                if (_streamDataAvailable is null || _streamDataAvailable.Task.IsCompleted)
+                    _streamDataAvailable = new TaskCompletionSource();
+                dataAvailableTask = _streamDataAvailable.Task;
             }
 
-            if (_streamDataAvailable is null || _streamDataAvailable.Task.IsCompleted)
-                _streamDataAvailable = new TaskCompletionSource();
+            var completedTask = await Task.WhenAny(dataAvailableTask, Task.Delay(Timeout.Infinite, ct), Task.Delay(Timeout.Infinite, _tickCts.Token));
 
-            var completedTask = await Task.WhenAny(_streamDataAvailable.Task, Task.Delay(-1, ct), Task.Delay(-1, _tickCts.Token));
-
-            if (completedTask == _streamDataAvailable.Task)
+            if (completedTask == dataAvailableTask)
                 continue;
             else
                 return 0;
@@ -214,12 +220,9 @@ public class RudpClient : IAsyncDisposable
         }
     }
 
-    private async Task SendReliableDatagramInternalAsync(byte[] data, bool isStream, CancellationToken ct)
+    private Task SendReliableDatagramInternalAsync(byte[] data, bool isStream, CancellationToken ct)
     {
-        if (128 < _reliablePackets.Count)
-            throw new Exception("Too many outgoing packets awaiting acknowledgement");
-
-        var id = ++_outgoingReliablePacketId;
+        var id = Interlocked.Increment(ref _outgoingReliablePacketId);
         byte[] packet =
         [
             isStream ? (byte)(EDataType.ReliableDatagram | EDataType.Stream) : (byte)EDataType.ReliableDatagram,
@@ -230,8 +233,29 @@ public class RudpClient : IAsyncDisposable
             ..data
         ];
 
+        _reliablePacketsBuffer.Enqueue((id, packet));
+        return DrainReliablePacketsBufferAsync(ct);
+    }
+
+    private async Task DrainReliablePacketsBufferAsync(CancellationToken ct)
+    {
+        if (_reliablePacketsBuffer.Count == 0)
+            return;
+
+        for (int i = _reliablePackets.Count; i < 16; i++)
+        {
+            if (_reliablePacketsBuffer.TryDequeue(out var item))
+                await SendReliablePacketAsync(item.id, item.packet, ct);
+            else
+                break;
+        }
+    }
+
+    private async Task SendReliablePacketAsync(uint id, byte[] packet, CancellationToken ct)
+    {
         var item = (Stopwatch.GetTimestamp(), packet);
         _reliablePackets.AddOrUpdate(id, item, (_, _) => item);
+
         await HolePuncher.SendTo(RemoteClient, packet, ct);
     }
 
@@ -242,7 +266,7 @@ public class RudpClient : IAsyncDisposable
             while (!_tickCts.IsCancellationRequested && await _tickTimer.WaitForNextTickAsync(_tickCts.Token))
             {
                 foreach (var (_, (time, packet)) in _reliablePackets)
-                    if (TickPeriod < Stopwatch.GetElapsedTime(time))
+                    if (TickPeriod <= Stopwatch.GetElapsedTime(time))
                         await HolePuncher.SendTo(RemoteClient, packet, _tickCts.Token);
             }
         }
