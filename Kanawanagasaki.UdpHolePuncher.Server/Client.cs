@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 
 internal class Client : IDisposable
 {
+    internal bool IsQuerable { get; set; } = false;
     internal IPEndPoint Endpoint { get; }
     internal long LastTimeSeen { get; set; } = 0;
 

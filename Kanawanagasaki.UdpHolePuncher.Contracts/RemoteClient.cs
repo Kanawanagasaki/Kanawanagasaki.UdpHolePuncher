@@ -1,33 +1,192 @@
 ﻿namespace Kanawanagasaki.UdpHolePuncher.Contracts;
 
-using ProtoBuf;
 using System.Net;
+using System.Text;
 
-[ProtoContract]
-public class RemoteClient
+public class RemoteClient : ISerializable
 {
-    [ProtoMember(1)]
-    public required byte[]? IpBytes { get; init; }
-    [ProtoMember(2)]
-    public required int Port { get; init; }
-    [ProtoMember(3)]
-    public string? Token { get; set; }
-    [ProtoMember(4)]
+    public Guid Uuid { get; init; } = Guid.NewGuid();
+    public required byte[] IpBytes { get; init; }
+    public required ushort Port { get; init; }
+    public required string Project { get; set; }
     public string? Name { get; set; }
-    [ProtoMember(5)]
+    public string? Password { get; set; }
     public byte[]? Extra { get; set; }
-    [ProtoMember(6)]
-    public required string[]? Tags { get; set; }
+    public string[]? Tags { get; set; }
 
-    public IPAddress Ip => new IPAddress(IpBytes ?? []);
+    public IPAddress Ip => new IPAddress(IpBytes);
     public IPEndPoint EndPoint => new IPEndPoint(Ip, Port);
 
+    public RemoteClientMin ToMin()
+        => new()
+        {
+            Uuid = Uuid,
+            Project = Project,
+            Name = Name,
+            Tags = Tags
+        };
+
     public override string ToString()
-        => $"RemoteClient {string.Join(".", IpBytes ?? [])}:{Port}{(Token is null ? "" : $"\n\tToken: {Token}")}{(Name is null ? "" : $"\n\tName: {Name}")}\n\tTags: [{string.Join(", ", Tags ?? [])}]";
+        => $"RemoteClient {string.Join(".", IpBytes ?? [])}:{Port}\n\tProject: {Project}{(Name is null ? "" : $"\n\tName: {Name}")}\n\tTags: [{string.Join(", ", Tags ?? [])}]";
 
-    public override bool Equals(object? obj)
-        => obj is RemoteClient other && Enumerable.SequenceEqual(IpBytes ?? [], other.IpBytes ?? []) && Port == other.Port;
+    public int GetSerializedSize()
+        => 1                                                                                    // flags
+        + 16                                                                                    // uuid
+        + IpBytes.Length                                                                        // ip
+        + 2                                                                                     // port
+        + 2 + Encoding.UTF32.GetByteCount(Project)                                              // project
+        + (Name is not null ? 2 + Encoding.UTF8.GetByteCount(Name) : 0)                         // name
+        + (Password is not null ? 2 + Encoding.UTF8.GetByteCount(Password) : 0)                 // password
+        + (Extra is not null ? 2 + Extra.Length : 0)                                            // extra
+        + (Tags is not null ? 2 + Tags.Length * 2 + Tags.Sum(Encoding.UTF8.GetByteCount) : 0);  // tags;
 
-    public override int GetHashCode()
-        => BitConverter.ToInt32(IpBytes is null || IpBytes.Length < 4 ? [0, 0, 0, 0] : IpBytes) ^ Port;
+    public void Serialize(Span<byte> span)
+    {
+        var isIpV6 = IpBytes.Length == 16;
+        var hasName = Name is not null;
+        var hasPassword = Password is not null;
+        var hasExtra = Extra is not null;
+        var hasTags = Tags is not null;
+        
+#pragma warning disable format
+        var flags = (isIpV6      ? 0b10000000 : 0)
+                  | (hasName     ? 0b01000000 : 0)
+                  | (hasPassword ? 0b00100000 : 0)
+                  | (hasExtra    ? 0b00010000 : 0)
+                  | (hasTags     ? 0b00001000 : 0);
+#pragma warning restore format
+
+        span[0] = (byte)flags;
+
+        var offset = 1;
+
+        Uuid.TryWriteBytes(span[offset..(offset + 16)]);
+        offset += 16;
+
+        IpBytes.CopyTo(span[offset..(offset + IpBytes.Length)]);
+        offset += IpBytes.Length;
+
+        span[offset++] = (byte)(Port >> 8);
+        span[offset++] = (byte)(Port & 0xFF);
+
+        var projectLen = Encoding.UTF8.GetByteCount(Project);
+        span[offset++] = (byte)((projectLen >> 8) & 0xFF);
+        span[offset++] = (byte)(projectLen & 0xFF);
+        Encoding.UTF8.GetBytes(Project, span[offset..(offset + projectLen)]);
+        offset += projectLen;
+
+        if (Name is not null)
+        {
+            var nametLen = Encoding.UTF8.GetByteCount(Name);
+            span[offset++] = (byte)((nametLen >> 8) & 0xFF);
+            span[offset++] = (byte)(nametLen & 0xFF);
+            Encoding.UTF8.GetBytes(Name, span[offset..(offset + nametLen)]);
+            offset += nametLen;
+        }
+
+        if (Password is not null)
+        {
+            var passwordLen = Encoding.UTF8.GetByteCount(Password);
+            span[offset++] = (byte)((passwordLen >> 8) & 0xFF);
+            span[offset++] = (byte)(passwordLen & 0xFF);
+            Encoding.UTF8.GetBytes(Password, span[offset..(offset + passwordLen)]);
+            offset += passwordLen;
+        }
+
+        if (Extra is not null)
+        {
+            span[offset++] = (byte)((Extra.Length >> 8) & 0xFF);
+            span[offset++] = (byte)(Extra.Length & 0xFF);
+            Extra.CopyTo(span[offset..(offset + Extra.Length)]);
+            offset += Extra.Length;
+        }
+
+        if (Tags is not null)
+        {
+            span[offset++] = (byte)((Tags.Length >> 8) & 0xFF);
+            span[offset++] = (byte)(Tags.Length & 0xFF);
+            foreach (var tag in Tags)
+            {
+                var tagLen = Encoding.UTF8.GetByteCount(tag);
+                span[offset++] = (byte)((tagLen >> 8) & 0xFF);
+                span[offset++] = (byte)(tagLen & 0xFF);
+                Encoding.UTF8.GetBytes(tag, span[offset..(offset + tagLen)]);
+                offset += tagLen;
+            }
+        }
+    }
+
+    public static RemoteClient Deserialize(ReadOnlySpan<byte> span)
+    {
+#pragma warning disable format
+        var isIpV6 =      (span[0] & 0b10000000) != 0;
+        var hasName =     (span[0] & 0b01000000) != 0;
+        var hasPassword = (span[0] & 0b00100000) != 0;
+        var hasExtra =    (span[0] & 0b00010000) != 0;
+        var hasTags =     (span[0] & 0b00001000) != 0;
+#pragma warning restore format
+
+        var offset = 1;
+
+        var uuid = span[offset..(offset + 16)];
+        offset += uuid.Length;
+
+        var ip = isIpV6 ? span[offset..(offset + 16)] : span[offset..(offset + 4)];
+        offset += ip.Length;
+
+        var port = (span[offset++] << 8) | span[offset++];
+
+        var projectLen = (span[offset++] << 8) | span[offset++];
+        var project = Encoding.UTF8.GetString(span[offset..(offset + projectLen)]);
+        offset += projectLen;
+
+        string? name = null;
+        if (hasName)
+        {
+            var nameLen = (span[offset++] << 8) | span[offset++];
+            name = Encoding.UTF8.GetString(span[offset..(offset + nameLen)]);
+            offset += nameLen;
+        }
+
+        string? password = null;
+        if (hasPassword)
+        {
+            var passwordLen = (span[offset++] << 8) | span[offset++];
+            password = Encoding.UTF8.GetString(span[offset..(offset + passwordLen)]);
+            offset += passwordLen;
+        }
+
+        byte[]? extra = null;
+        if (hasExtra)
+        {
+            var extraLen = (span[offset++] << 8) | span[offset++];
+            extra = span[offset..(offset + extraLen)].ToArray();
+            offset += extraLen;
+        }
+
+        string[]? tags = null;
+        if (hasTags)
+        {
+            var tagsNumber = (span[offset++] << 8) | span[offset++];
+            tags = new string[tagsNumber];
+            for (int i = 0; i < tagsNumber; i++)
+            {
+                var tagLen = (span[offset++] << 8) | span[offset++];
+                tags[i] = Encoding.UTF8.GetString(span[offset..(offset + tagLen)]);
+                offset += tagLen;
+            }
+        }
+
+        return new()
+        {
+            Uuid = new Guid(uuid),
+            IpBytes = ip.ToArray(),
+            Port = (ushort)port,
+            Project = project,
+            Name = name,
+            Password = password,
+            Extra = extra,
+            Tags = tags
+        };
+    }
 }

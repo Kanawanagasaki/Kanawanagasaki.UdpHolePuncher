@@ -10,13 +10,15 @@ public class Rudp
 {
     public static async Task Main(string[] args)
     {
-        await using var hp1 = new HolePuncherClient(new(IPAddress.Loopback, 9999), "rudp", _ => true);
-        await hp1.Start(default);
+        await Task.Delay(3000);
+
+        await using var hp1 = new HolePuncherClient(new(IPAddress.Loopback, 9999), "rudp", _ => true) { IsQuerable = true };
+        await hp1.Start(TimeSpan.FromSeconds(2), default);
         while (hp1.PunchResult is null)
             await Task.Delay(100);
 
-        await using var hp2 = new HolePuncherClient(new(IPAddress.Loopback, 9999), "rudp", _ => true);
-        await hp2.Start(default);
+        await using var hp2 = new HolePuncherClient(new(IPAddress.Loopback, 9999), "rudp", _ => true) { IsQuerable = true };
+        await hp2.Start(TimeSpan.FromSeconds(2), default);
         while (hp2.PunchResult is null)
             await Task.Delay(100);
 
@@ -30,15 +32,15 @@ public class Rudp
 
         await using var rudp1 = new RudpClient(hp1, hp2.PunchResult)
         {
-            DebugDropPackets = true,
-            DebugDropPacketsChance = 0.0d
+            DebugDropPackets = false,
+            DebugDropPacketsChance = 0.1d
         };
         rudp1.OnDatagram += (c, x) => Console.Write(Encoding.UTF8.GetString(x.Span));
 
         await using var rudp2 = new RudpClient(hp2, hp1.PunchResult)
         {
-            DebugDropPackets = true,
-            DebugDropPacketsChance = 0.0d
+            DebugDropPackets = false,
+            DebugDropPacketsChance = 0.1d
         };
         rudp2.OnDatagram += (c, x) => Console.Write(Encoding.UTF8.GetString(x.Span));
 

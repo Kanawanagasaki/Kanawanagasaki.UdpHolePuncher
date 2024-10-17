@@ -6,8 +6,9 @@ using System.Net;
 
 internal static class Clients
 {
+    private static readonly ConcurrentDictionary<Guid, Client> _uuidToClient = new();
     private static readonly ConcurrentDictionary<IPEndPoint, Client> _endpointToClient = new();
-    private static readonly Dictionary<string, HashSet<IPEndPoint>> _tokenToEndpoints = new();
+    private static readonly Dictionary<string, HashSet<IPEndPoint>> _projectToEndpoints = new();
     private static object _lock = new object();
 
     internal static bool IsClientExists(IPEndPoint endpoint)
@@ -26,41 +27,54 @@ internal static class Clients
         return client;
     }
 
+    internal static Client? GetClientByUuid(Guid uuid)
+        => _uuidToClient.GetValueOrDefault(uuid);
+
     internal static void UpdateClientTime(Client client)
         => client.LastTimeSeen = Stopwatch.GetTimestamp();
 
     internal static void UpdateClientTime(IPEndPoint endpoint)
         => UpdateClientTime(GetClientByEndpoint(endpoint));
 
+    internal static void UpdateClientUuid(Client client)
+    {
+        if (client.RemoteClient is not null)
+            _uuidToClient.AddOrUpdate(client.RemoteClient.Uuid, client, (_, _) => client);
+    }
+
     internal static void RemoveClient(IPEndPoint endpoint)
     {
         if (_endpointToClient.TryRemove(endpoint, out var client))
         {
-            RemoveClientFromGroup(endpoint, client.RemoteClient?.Token ?? string.Empty);
+            if (client.RemoteClient is not null)
+                _uuidToClient.TryRemove(client.RemoteClient.Uuid, out _);
+
+            RemoveClientFromGroup(endpoint, client.RemoteClient?.Project ?? string.Empty);
+
             client.Dispose();
 
             Console.WriteLine($"@{endpoint}: client disconnected");
         }
     }
 
-    internal static IEnumerable<Client>? GetGroupByToken(string token)
+    internal static IEnumerable<Client>? GetGroupByProject(string project)
     {
         lock (_lock)
         {
-            var group = _tokenToEndpoints.GetValueOrDefault(token);
+            var group = _projectToEndpoints.GetValueOrDefault(project);
             return group is null ? null : group.Select(GetClientByEndpoint);
         }
     }
 
-    internal static void AddClientToGroup(IPEndPoint endpoint, string token)
+    internal static void AddClientToGroup(IPEndPoint endpoint, string project)
     {
         lock (_lock)
         {
-            var group = _tokenToEndpoints.GetValueOrDefault(token);
+            var group = _projectToEndpoints.GetValueOrDefault(project);
             if (group is null)
             {
-                _tokenToEndpoints[token] = group = new();
-                Console.WriteLine($"{token}: group created");
+                _projectToEndpoints[project] = group = new();
+                Console.WriteLine($"{project}: group created");
             }
             group.Add(endpoint);
 
@@ -68,19 +82,19 @@ internal static class Clients
         }
     }
 
-    internal static void RemoveClientFromGroup(IPEndPoint endpoint, string token)
+    internal static void RemoveClientFromGroup(IPEndPoint endpoint, string project)
     {
         lock (_lock)
         {
-            if (_tokenToEndpoints.TryGetValue(token, out var group))
+            if (_projectToEndpoints.TryGetValue(project, out var group))
             {
                 group.Remove(endpoint);
                 Console.WriteLine($"@{endpoint}: client removed from group");
 
                 if (group.Count == 0)
                 {
-                    _tokenToEndpoints.Remove(token);
-                    Console.WriteLine($"{token}: group deleted");
+                    _projectToEndpoints.Remove(project);
+                    Console.WriteLine($"{project}: group deleted");
                 }
             }
         }
@@ -92,7 +106,10 @@ internal static class Clients
         {
             if (TimeSpan.FromMinutes(10) < Stopwatch.GetElapsedTime(client.LastTimeSeen))
             {
-                RemoveClientFromGroup(client.Endpoint, client.RemoteClient?.Token ?? string.Empty);
+                if (client.RemoteClient is not null)
+                    _uuidToClient.TryRemove(client.RemoteClient.Uuid, out _);
+
+                RemoveClientFromGroup(client.Endpoint, client.RemoteClient?.Project ?? string.Empty);
                 _endpointToClient.TryRemove(client.Endpoint, out _);
 
                 Console.WriteLine($"{client.RemoteClient?.Name}@{client.Endpoint}: client disconnected due to inactivity");
@@ -100,13 +117,17 @@ internal static class Clients
                 client.Dispose();
             }
         }
+
+        foreach (var (uuid, client) in _uuidToClient)
+            if (client.RemoteClient is null || client.RemoteClient.Uuid != uuid || !_endpointToClient.ContainsKey(client.Endpoint))
+                _uuidToClient.TryRemove(uuid, out _);
     }
 
     internal static void ClearEmptyGroups()
     {
         lock (_lock)
         {
-            foreach (var (token, endpoints) in _tokenToEndpoints.ToArray())
+            foreach (var (token, endpoints) in _projectToEndpoints.ToArray())
             {
                 foreach (var endpoint in endpoints.ToArray())
                 {
@@ -118,7 +139,7 @@ internal static class Clients
                 }
                 if (endpoints.Count == 0)
                 {
-                    _tokenToEndpoints.Remove(token);
+                    _projectToEndpoints.Remove(token);
                     Console.WriteLine($"{token}: group deleted");
                 }
             }

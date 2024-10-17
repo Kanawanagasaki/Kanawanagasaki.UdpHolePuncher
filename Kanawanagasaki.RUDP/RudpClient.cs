@@ -58,7 +58,7 @@ public class RudpClient : IAsyncDisposable
 
     private void HolePuncher_OnData(RemoteClient client, byte[] data)
     {
-        if (!RemoteClient.Equals(client))
+        if (!RemoteClient.EndPoint.Equals(client.EndPoint))
             return;
         if (data.Length < 1)
             return;

@@ -5,8 +5,6 @@ using Org.BouncyCastle.Asn1.X509;
 using Org.BouncyCastle.Crypto.Encodings;
 using Org.BouncyCastle.Crypto.Engines;
 using Org.BouncyCastle.Security;
-using Org.BouncyCastle.Utilities;
-using ProtoBuf;
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -15,7 +13,6 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
-using static System.Runtime.InteropServices.JavaScript.JSType;
 
 public class HolePuncherClient : IAsyncDisposable
 {
@@ -33,8 +30,11 @@ public class HolePuncherClient : IAsyncDisposable
     }
     public TimeSpan InactiveClientsDisconnectTimeSpan { get; set; } = TimeSpan.FromSeconds(90);
 
-    public string Token { get; }
+    public bool IsQuerable { get; set; } = false;
+
+    public string Project { get; }
     public string? Name { get; set; }
+    public string? Password { get; set; }
     public byte[]? Extra { get; set; }
     public string[] Tags { get; set; } = [];
 
@@ -50,6 +50,9 @@ public class HolePuncherClient : IAsyncDisposable
 
     private readonly IPEndPoint _serverEndPoint;
     public EConnectionStatus ServerConnectionStatus { get; private set; } = EConnectionStatus.Disconnected;
+    private readonly SemaphoreSlim _startSemaphore = new(1, 1);
+    private TaskCompletionSource<byte[]>? _serverPublicKeyTcs;
+    private TaskCompletionSource? _serverHandshakeCompleteTcs;
 
     private readonly PeriodicTimer _timer = new(TimeSpan.FromSeconds(2));
     private Task? _tickTask;
@@ -58,17 +61,17 @@ public class HolePuncherClient : IAsyncDisposable
     private Task? _receiveTask;
     private CancellationTokenSource? _receiveCts;
 
-    private TaskCompletionSource<QueryRes?>? _queryResTask;
+    private TaskCompletionSource<QueryRes?>? _queryResTcs;
     private readonly SemaphoreSlim _queryResSemaphore = new(1, 1);
 
-    private readonly ConcurrentDictionary<IPEndPoint, (RemoteClient remoteClient, long addedTime)> _toConnect = new();
+    private readonly ConcurrentDictionary<Guid, (long timeAdded, string? password)> _toConnect = new();
     private readonly ConcurrentDictionary<IPEndPoint, P2PClient> _connectedClients = new();
     public IEnumerable<RemoteClient> ConnectedClients => _connectedClients.Values.Select(x => x.RemoteClient);
 
-    public HolePuncherClient(IPEndPoint serverEndPoint, string token, Func<RemoteClient, bool> allowClient)
+    public HolePuncherClient(IPEndPoint serverEndPoint, string project, Func<RemoteClient, bool> allowClient)
     {
         _serverEndPoint = serverEndPoint;
-        Token = token;
+        Project = project;
         UdpClient = new UdpClient()
         {
             ExclusiveAddressUse = false
@@ -77,31 +80,74 @@ public class HolePuncherClient : IAsyncDisposable
         _allowClientCallback = allowClient;
     }
 
-    public async Task Start(CancellationToken ct)
+    public async Task Start(TimeSpan timeout, CancellationToken ct)
     {
         if (ServerConnectionStatus != EConnectionStatus.Disconnected)
             await Stop(ct);
 
-        _aesKey = RandomNumberGenerator.GetBytes(32);
-        _aesIV = RandomNumberGenerator.GetBytes(12);
-        _aes = new(_aesKey, 16);
+        await _startSemaphore.WaitAsync();
 
-        ServerConnectionStatus = EConnectionStatus.Handshake;
+        try
+        {
+            _aesKey = RandomNumberGenerator.GetBytes(32);
+            _aesIV = RandomNumberGenerator.GetBytes(AesGcm.NonceByteSizes.MaxSize);
+            _aes = new(_aesKey, AesGcm.TagByteSizes.MaxSize);
+            ServerConnectionStatus = EConnectionStatus.Handshake;
 
-        _receiveCts = new();
-        _receiveTask = Receive();
+            _receiveCts = new();
+            _receiveTask = Receive();
 
-        _tickCts = new();
-        _tickTask = Tick();
+            if (_serverPublicKeyTcs is not null)
+                _serverPublicKeyTcs.TrySetCanceled();
+            _serverPublicKeyTcs = new();
+            await SendPacket(_serverEndPoint, EPacketType.RSAPublicKey, ct);
+            var pubKeyTask = await Task.WhenAny([_serverPublicKeyTcs.Task, Task.Delay(timeout, ct)]);
+
+            if (pubKeyTask != _serverPublicKeyTcs.Task || !_serverPublicKeyTcs.Task.IsCompleted)
+            {
+                await Stop(ct);
+                throw new TimeoutException();
+            }
+
+            if (_serverHandshakeCompleteTcs is not null)
+                _serverHandshakeCompleteTcs.TrySetCanceled();
+            _serverHandshakeCompleteTcs = new();
+
+            var serverPublicKey = await _serverPublicKeyTcs.Task;
+            await ProcessServerRSAPublicKey(serverPublicKey, ct);
+
+            var handshakeCompleteTask = await Task.WhenAny([_serverHandshakeCompleteTcs.Task, Task.Delay(timeout, ct)]);
+
+            if (handshakeCompleteTask != _serverHandshakeCompleteTcs.Task || !_serverHandshakeCompleteTcs.Task.IsCompleted)
+            {
+                await Stop(ct);
+                throw new TimeoutException();
+            }
+
+            ServerConnectionStatus = EConnectionStatus.Connected;
+
+            _tickCts = new();
+            _tickTask = Tick();
+
+            await Punch(ct);
+        }
+        finally
+        {
+            _startSemaphore.Release();
+        }
     }
 
-    public async Task Connect(RemoteClient client, CancellationToken ct)
-    {
-        _toConnect.AddOrUpdate(client.EndPoint, (client, Stopwatch.GetTimestamp()), (_, _) => (client, Stopwatch.GetTimestamp()));
+    public Task Connect(RemoteClient client, CancellationToken ct)
+        => Connect(client.Uuid, client.Password, ct);
 
-        var connect = new ConnectOp { IpBytes = client.IpBytes, Port = client.Port };
-        await EncryptAndSendOperationToServer(EOperation.Connect, connect, ct);
-        await SendPacket(client.EndPoint, EPacketType.Ping, ct);
+    public Task Connect(RemoteClientMin client, string? password, CancellationToken ct)
+        => Connect(client.Uuid, password, ct);
+
+    private Task Connect(Guid uuid, string? password, CancellationToken ct)
+    {
+        _toConnect.AddOrUpdate(uuid, (Stopwatch.GetTimestamp(), password), (_, _) => (Stopwatch.GetTimestamp(), password));
+        var connect = new ConnectOp { Uuid = uuid, Password = password };
+        return EncryptAndSendOperationToServer(EOperation.Connect, connect, ct);
     }
 
     private async Task SendPacket(IPEndPoint endpoint, EPacketType packetType, CancellationToken ct)
@@ -116,21 +162,19 @@ public class HolePuncherClient : IAsyncDisposable
         await UdpClient.SendAsync(payload, endpoint, ct);
     }
 
-    private Task EncryptAndSendOperationToServer<T>(EOperation op, T payload, CancellationToken ct) where T : class
+    private Task EncryptAndSendOperationToServer(EOperation op, ISerializable payload, CancellationToken ct)
     {
         if (_aesKey is null || _aesIV is null || _aes is null)
             return Task.CompletedTask;
 
-        using var memory = new MemoryStream();
-
         var opNum = (ushort)op;
-        memory.WriteByte((byte)(opNum >> 8));
-        memory.WriteByte((byte)(opNum & 0xFF));
+        var buffer = new byte[2 + payload.GetSerializedSize()];
+        buffer[0] = (byte)(opNum >> 8);
+        buffer[1] = (byte)(opNum & 0xFF);
+        payload.Serialize(buffer.AsSpan(2));
 
-        Serializer.Serialize(memory, payload);
-
-        var encrypted = new byte[memory.Length + 16].AsMemory();
-        _aes.Encrypt(_aesIV, memory.ToArray(), encrypted[..^16].Span, encrypted[^16..].Span);
+        var encrypted = new byte[buffer.Length + AesGcm.TagByteSizes.MaxSize].AsMemory();
+        _aes.Encrypt(_aesIV, buffer, encrypted[..^AesGcm.TagByteSizes.MaxSize].Span, encrypted[^AesGcm.TagByteSizes.MaxSize..].Span);
 
         return SendPacket(_serverEndPoint, EPacketType.AESEncryptedData, encrypted, ct);
     }
@@ -139,26 +183,27 @@ public class HolePuncherClient : IAsyncDisposable
     {
         var opNum = (ushort)op;
         var data = new byte[] { (byte)(opNum >> 8), (byte)(opNum & 0xFF) };
-        var encrypted = new byte[18].AsMemory();
-        p2p.Aes.Encrypt(p2p.AesIV, data, encrypted[..^16].Span, encrypted[^16..].Span);
+        var encrypted = new byte[2 + AesGcm.TagByteSizes.MaxSize].AsMemory();
+        p2p.Aes.Encrypt(p2p.AesIV, data, encrypted[..^AesGcm.TagByteSizes.MaxSize].Span, encrypted[^AesGcm.TagByteSizes.MaxSize..].Span);
 
         return SendPacket(p2p.EndPoint, EPacketType.AESEncryptedData, encrypted, ct);
     }
 
-    private async Task EncryptAndSendOperation<T>(P2PClient p2p, EOperation op, T payload, CancellationToken ct) where T : class
+    private Task EncryptAndSendOperation(P2PClient p2p, EOperation op, ISerializable payload, CancellationToken ct)
     {
-        using var memory = new MemoryStream();
+        if (_aesKey is null || _aesIV is null || _aes is null)
+            return Task.CompletedTask;
 
         var opNum = (ushort)op;
-        memory.WriteByte((byte)(opNum >> 8));
-        memory.WriteByte((byte)(opNum & 0xFF));
+        var buffer = new byte[2 + payload.GetSerializedSize()];
+        buffer[0] = (byte)(opNum >> 8);
+        buffer[1] = (byte)(opNum & 0xFF);
+        payload.Serialize(buffer.AsSpan(2));
 
-        Serializer.Serialize(memory, payload);
+        var encrypted = new byte[buffer.Length + AesGcm.TagByteSizes.MaxSize].AsMemory();
+        p2p.Aes.Encrypt(p2p.AesIV, buffer, encrypted[..^AesGcm.TagByteSizes.MaxSize].Span, encrypted[^AesGcm.TagByteSizes.MaxSize..].Span);
 
-        var encrypted = new byte[memory.Length + 16].AsMemory();
-        p2p.Aes.Encrypt(p2p.AesIV, memory.ToArray(), encrypted[..^16].Span, encrypted[^16..].Span);
-
-        await SendPacket(p2p.EndPoint, EPacketType.AESEncryptedData, encrypted, ct);
+        return SendPacket(p2p.EndPoint, EPacketType.AESEncryptedData, encrypted, ct);
     }
 
     public async Task SendTo(RemoteClient client, byte[] data, CancellationToken ct)
@@ -173,8 +218,8 @@ public class HolePuncherClient : IAsyncDisposable
         memory.WriteByte((byte)(opNum & 0xFF));
         memory.Write(data);
 
-        var encrypted = new byte[memory.Length + 16].AsMemory();
-        p2p.Aes.Encrypt(p2p.AesIV, memory.ToArray(), encrypted[..^16].Span, encrypted[^16..].Span);
+        var encrypted = new byte[memory.Length + AesGcm.TagByteSizes.MaxSize].AsMemory();
+        p2p.Aes.Encrypt(p2p.AesIV, memory.ToArray(), encrypted[..^AesGcm.TagByteSizes.MaxSize].Span, encrypted[^AesGcm.TagByteSizes.MaxSize..].Span);
 
         await SendPacket(p2p.EndPoint, EPacketType.AESEncryptedData, encrypted, ct);
     }
@@ -187,49 +232,29 @@ public class HolePuncherClient : IAsyncDisposable
             {
                 try
                 {
+                    if (ServerConnectionStatus != EConnectionStatus.Connected)
+                        break;
                     if (_tickCts is null)
                         break;
 
                     var ct = _tickCts.Token;
-                    if (ServerConnectionStatus == EConnectionStatus.Handshake)
-                    {
-                        await SendPacket(_serverEndPoint, EPacketType.RSAPublicKey, ct);
-                        continue;
-                    }
-                    else if (ServerConnectionStatus != EConnectionStatus.Connected)
-                        continue;
-
                     await Punch(ct);
 
-                    foreach (var (endpoint, (remoteClient, timeAdded)) in _toConnect.ToArray())
+                    foreach (var (uuid, (timeAdded, password)) in _toConnect)
                     {
                         if (Stopwatch.GetElapsedTime(timeAdded) < InactiveClientsDisconnectTimeSpan)
                         {
-                            var connect = new ConnectOp { IpBytes = remoteClient.IpBytes, Port = remoteClient.Port };
+                            var connect = new ConnectOp { Uuid = uuid, Password = password };
                             await EncryptAndSendOperationToServer(EOperation.Connect, connect, ct);
-                            await SendPacket(endpoint, EPacketType.Ping, ct);
                         }
                         else
-                            _toConnect.TryRemove(endpoint, out _);
+                            _toConnect.TryRemove(uuid, out _);
                     }
 
-                    foreach (var (endpoint, p2pClient) in _connectedClients.ToArray())
+                    foreach (var (endpoint, p2pClient) in _connectedClients)
                     {
                         if (Stopwatch.GetElapsedTime(p2pClient.LastTimePing) < InactiveClientsDisconnectTimeSpan)
-                        {
                             await SendPacket(endpoint, EPacketType.Ping, ct);
-
-                            if (p2pClient.ConnectionStatus == EConnectionStatus.Handshake)
-                            {
-                                var handshake = new HandshakeOp
-                                {
-                                    AesKey = _aesKey,
-                                    AesIV = _aesIV,
-                                };
-
-                                await EncryptAndSendOperation(p2pClient, EOperation.Handshake, handshake, ct);
-                            }
-                        }
                         else
                         {
                             _connectedClients.TryRemove(endpoint, out _);
@@ -249,8 +274,10 @@ public class HolePuncherClient : IAsyncDisposable
     {
         var punch = new PunchOp
         {
-            Token = Token,
+            IsQuerable = IsQuerable,
+            Project = Project,
             Name = Name,
+            Password = Password,
             Extra = Extra,
             Tags = Tags
         };
@@ -260,19 +287,18 @@ public class HolePuncherClient : IAsyncDisposable
 
     public async Task<QueryRes?> Query(string[]? tags, TimeSpan timeout, CancellationToken ct)
     {
+        await _queryResSemaphore.WaitAsync();
         try
         {
-            await _queryResSemaphore.WaitAsync();
+            _queryResTcs = new();
 
-            _queryResTask = new();
-
-            var query = new QueryOp { Token = Token, Tags = tags };
+            var query = new QueryOp { Project = Project, Tags = tags };
             await EncryptAndSendOperationToServer(EOperation.Query, query, ct);
-            await Task.WhenAny([_queryResTask.Task, Task.Delay(timeout, ct)]);
+            await Task.WhenAny([_queryResTcs.Task, Task.Delay(timeout, ct)]);
 
-            var res = _queryResTask.Task.IsCompletedSuccessfully ? await _queryResTask.Task : null;
+            var res = _queryResTcs.Task.IsCompletedSuccessfully ? await _queryResTcs.Task : null;
 
-            _queryResTask = null;
+            _queryResTcs = null;
 
             return res;
         }
@@ -291,7 +317,7 @@ public class HolePuncherClient : IAsyncDisposable
 
     private async Task Receive()
     {
-        while (_receiveCts is not null && !_receiveCts.IsCancellationRequested)
+        while (_receiveCts is not null && !_receiveCts.IsCancellationRequested && ServerConnectionStatus != EConnectionStatus.Disconnected)
         {
             var ct = _receiveCts.Token;
             try
@@ -306,11 +332,16 @@ public class HolePuncherClient : IAsyncDisposable
                 switch ((EPacketType)receiveRes.Buffer[0])
                 {
                     case EPacketType.RSAPublicKey:
-                        await ProcessServerRSAPublicKey(memoryBytes[1..], ct);
+                        if (!remoteEndpoint.Equals(_serverEndPoint))
+                            break;
+                        if (_serverPublicKeyTcs is not null)
+                            _serverPublicKeyTcs.TrySetResult(receiveRes.Buffer[1..]);
                         break;
                     case EPacketType.HandshakeComplete:
-                        ServerConnectionStatus = EConnectionStatus.Connected;
-                        await Punch(ct);
+                        if (!remoteEndpoint.Equals(_serverEndPoint))
+                            break;
+                        if (_serverHandshakeCompleteTcs is not null)
+                            _serverHandshakeCompleteTcs.TrySetResult();
                         break;
                     case EPacketType.AESEncryptedData:
                         if (TryDecrypt(memoryBytes[1..], out var decrypted))
@@ -331,7 +362,6 @@ public class HolePuncherClient : IAsyncDisposable
                         }
                     case EPacketType.Disconnect:
                         {
-                            _toConnect.TryRemove(remoteEndpoint, out _);
                             if (_connectedClients.TryRemove(remoteEndpoint, out var p2pClient))
                                 OnRemoteClientDisconnected?.Invoke(p2pClient.RemoteClient);
                             break;
@@ -356,9 +386,11 @@ public class HolePuncherClient : IAsyncDisposable
         if (_aesKey is null)
             _aesKey = RandomNumberGenerator.GetBytes(32);
         if (_aesIV is null)
-            _aesIV = RandomNumberGenerator.GetBytes(12);
-        byte[] payload = [.. _aesKey, .. _aesIV];
-        var encryptedAesKey = encryptEngine.ProcessBlock(payload, 0, payload.Length);
+            _aesIV = RandomNumberGenerator.GetBytes(AesGcm.NonceByteSizes.MaxSize);
+        var handshakeOp = new HandshakeOp { AesKey = _aesKey, AesIV = _aesIV };
+        var buffer = new byte[handshakeOp.GetSerializedSize()];
+        handshakeOp.Serialize(buffer);
+        var encryptedAesKey = encryptEngine.ProcessBlock(buffer, 0, buffer.Length);
         return SendPacket(_serverEndPoint, EPacketType.RSAEncryptedAESKey, encryptedAesKey, ct);
     }
 
@@ -369,11 +401,11 @@ public class HolePuncherClient : IAsyncDisposable
         if (_aesKey is null || _aesIV is null || _aes is null)
             return false;
 
-        if (data.Length < 17)
+        if (data.Length < AesGcm.TagByteSizes.MaxSize)
             return false;
 
-        decryptedData = new byte[data.Length - 16];
-        _aes.Decrypt(_aesIV, data[..^16].Span, data[^16..].Span, decryptedData.Span);
+        decryptedData = new byte[data.Length - AesGcm.TagByteSizes.MaxSize];
+        _aes.Decrypt(_aesIV, data[..^AesGcm.TagByteSizes.MaxSize].Span, data[^AesGcm.TagByteSizes.MaxSize..].Span, decryptedData.Span);
 
         return true;
     }
@@ -389,7 +421,7 @@ public class HolePuncherClient : IAsyncDisposable
         {
             case EOperation.PunchRes:
                 {
-                    PunchResult = Serializer.Deserialize<RemoteClient>(data[2..]);
+                    PunchResult = RemoteClient.Deserialize(data[2..].Span);
                     break;
                 }
             case EOperation.QueryRes:
@@ -397,74 +429,42 @@ public class HolePuncherClient : IAsyncDisposable
                     QueryRes? queryRes;
                     try
                     {
-                        queryRes = Serializer.Deserialize<QueryRes>(data[2..]);
+                        queryRes = QueryRes.Deserialize(data[2..].Span);
                     }
                     catch
                     {
                         queryRes = null;
                     }
 
-                    if (_queryResTask is not null && !_queryResTask.Task.IsCompleted)
-                        _queryResTask.SetResult(queryRes);
+                    if (_queryResTcs is not null)
+                        _queryResTcs.TrySetResult(queryRes);
                     break;
                 }
             case EOperation.P2P:
                 {
+                    if (!endpoint.Equals(_serverEndPoint))
+                        break;
+
                     if (_aesKey is null || _aesIV is null)
                         break;
 
-                    var p2p = Serializer.Deserialize<P2POp>(data[2..]);
-                    if (p2p?.RemoteClient is null || p2p?.AesKey is null || p2p?.AesIV is null)
-                        break;
-
+                    var p2p = P2POp.Deserialize(data[2..].Span);
                     if (!_allowClientCallback(p2p.RemoteClient))
                         break;
 
-                    var p2pClient = new P2PClient(p2p.RemoteClient, p2p.AesKey, p2p.AesIV)
-                    {
-                        ConnectionStatus = EConnectionStatus.Handshake,
-                        LastTimePing = Stopwatch.GetTimestamp()
-                    };
-                    _connectedClients.AddOrUpdate(p2pClient.EndPoint, p2pClient, (_, _) => p2pClient);
-
-                    var handshake = new HandshakeOp
-                    {
-                        AesKey = _aesKey,
-                        AesIV = _aesIV,
-                    };
-
-                    await EncryptAndSendOperation(p2pClient, EOperation.Handshake, handshake, ct);
-
-                    break;
-                }
-            case EOperation.Handshake:
-                {
-                    if (_connectedClients.TryGetValue(endpoint, out var connectedP2PClient))
-                    {
-                        await EncryptAndSendOperation(connectedP2PClient, EOperation.HandshakeAck, ct);
-                        break;
-                    }
-
-                    if (!_toConnect.TryRemove(endpoint, out var toConnect))
-                        break;
-
-                    var handshake = Serializer.Deserialize<HandshakeOp>(data[2..]);
-                    if (handshake?.AesKey is null || handshake?.AesIV is null)
-                        break;
-
-                    var p2pClient = _connectedClients.GetValueOrDefault(endpoint);
+                    var p2pClient = _connectedClients.GetValueOrDefault(p2p.RemoteClient.EndPoint);
                     if (p2pClient is null)
                     {
-                        p2pClient = new P2PClient(toConnect.remoteClient, handshake.AesKey, handshake.AesIV)
+                        p2pClient = new P2PClient(p2p.RemoteClient, p2p.AesKey, p2p.AesIV)
                         {
-                            ConnectionStatus = EConnectionStatus.Connected,
+                            ConnectionStatus = EConnectionStatus.Handshake,
                             LastTimePing = Stopwatch.GetTimestamp()
                         };
-                        _connectedClients.AddOrUpdate(endpoint, p2pClient, (_, _) => p2pClient);
-                        OnRemoteClientConnected?.Invoke(p2pClient.RemoteClient);
+                        _connectedClients.AddOrUpdate(p2pClient.EndPoint, p2pClient, (_, _) => p2pClient);
                     }
 
-                    await EncryptAndSendOperation(p2pClient, EOperation.HandshakeAck, ct);
+                    if (p2pClient.ConnectionStatus == EConnectionStatus.Handshake)
+                        await EncryptAndSendOperation(p2pClient, EOperation.HandshakeAck, ct);
 
                     break;
                 }
@@ -477,6 +477,7 @@ public class HolePuncherClient : IAsyncDisposable
                             p2pClient.ConnectionStatus = EConnectionStatus.Connected;
                             OnRemoteClientConnected?.Invoke(p2pClient.RemoteClient);
                         }
+                        _toConnect.TryRemove(p2pClient.RemoteClient.Uuid, out _);
                     }
 
                     break;
@@ -497,7 +498,7 @@ public class HolePuncherClient : IAsyncDisposable
 
     public async Task Disconnect(RemoteClient client, CancellationToken ct)
     {
-        _toConnect.TryRemove(client.EndPoint, out _);
+        _toConnect.TryRemove(client.Uuid, out _);
 
         if (_connectedClients.TryRemove(client.EndPoint, out var p2pClient))
         {
@@ -530,6 +531,15 @@ public class HolePuncherClient : IAsyncDisposable
             _receiveTask = null;
             _receiveCts = null;
         }
+
+        _serverPublicKeyTcs?.TrySetCanceled();
+        _serverPublicKeyTcs = null;
+
+        _serverHandshakeCompleteTcs?.TrySetCanceled();
+        _serverHandshakeCompleteTcs = null;
+
+        _queryResTcs?.TrySetCanceled();
+        _queryResTcs = null;
 
         PunchResult = null;
         ServerConnectionStatus = EConnectionStatus.Disconnected;

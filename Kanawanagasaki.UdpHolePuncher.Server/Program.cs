@@ -6,12 +6,11 @@ using Org.BouncyCastle.Crypto.Engines;
 using Org.BouncyCastle.Crypto.Generators;
 using Org.BouncyCastle.Security;
 using Org.BouncyCastle.X509;
-using ProtoBuf;
 using System.Buffers;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
-using static System.Runtime.InteropServices.JavaScript.JSType;
+using System.Security.Cryptography;
 
 var keyPairGenerator = new RsaKeyPairGenerator();
 keyPairGenerator.Init(new KeyGenerationParameters(new SecureRandom(), 2048));
@@ -119,30 +118,29 @@ async Task SendPacketNoData(IPEndPoint endpoint, EPacketType packetType, Cancell
 Task SendPublicRSAKey(IPEndPoint endpoint, CancellationToken ct)
     => SendPacket(endpoint, EPacketType.RSAPublicKey, publicKeyBytes, ct);
 
-async Task EncryptAndSendOperation<T>(Client client, EOperation op, T payload, CancellationToken ct) where T : class
+async Task EncryptAndSendOperation(Client client, EOperation op, ISerializable payload, CancellationToken ct)
 {
     if (client.AesKey is null || client.AesIV is null)
         return;
     if (client.Aes is null)
-        client.Aes = new(client.AesKey, 16);
-
-    using var memory = new MemoryStream();
+        client.Aes = new(client.AesKey, AesGcm.TagByteSizes.MaxSize);
 
     var opNum = (ushort)op;
-    memory.WriteByte((byte)(opNum >> 8));
-    memory.WriteByte((byte)(opNum & 0xFF));
+    var buffer = new byte[2 + payload.GetSerializedSize()];
+    buffer[0] = (byte)(opNum >> 8);
+    buffer[1] = (byte)(opNum & 0xFF);
+    payload.Serialize(buffer.AsSpan(2));
 
-    Serializer.Serialize(memory, payload);
-
-    var encrypted = new byte[memory.Length + 16].AsMemory();
-    client.Aes.Encrypt(client.AesIV, memory.ToArray(), encrypted[..^16].Span, encrypted[^16..].Span);
+    var encrypted = new byte[buffer.Length + AesGcm.TagByteSizes.MaxSize].AsMemory();
+    client.Aes.Encrypt(client.AesIV, buffer, encrypted[..^AesGcm.TagByteSizes.MaxSize].Span, encrypted[^AesGcm.TagByteSizes.MaxSize..].Span);
 
     await SendPacket(client.Endpoint, EPacketType.AESEncryptedData, encrypted, ct);
 }
 
-async Task DecryptAndSaveAesKey(Client client, byte[] data, CancellationToken ct)
+async Task DecryptAndSaveAesKey(Client client, byte[] encryptedData, CancellationToken ct)
 {
-    var aesKeyIV = decryptEngine.ProcessBlock(data, 0, data.Length);
+    var decryptedData = decryptEngine.ProcessBlock(encryptedData, 0, encryptedData.Length);
+    var handshakeOp = HandshakeOp.Deserialize(decryptedData);
 
     if (client.Aes is not null)
     {
@@ -150,12 +148,9 @@ async Task DecryptAndSaveAesKey(Client client, byte[] data, CancellationToken ct
         client.Aes = null;
     }
 
-    if (aesKeyIV.Length != 44)
-        return;
-
-    client.AesKey = aesKeyIV[..^12];
-    client.AesIV = aesKeyIV[^12..];
-    client.Aes = new(client.AesKey, 16);
+    client.AesKey = handshakeOp.AesKey;
+    client.AesIV = handshakeOp.AesIV;
+    client.Aes = new(client.AesKey, AesGcm.TagByteSizes.MaxSize);
 
     await SendPacketNoData(client.Endpoint, EPacketType.HandshakeComplete, ct);
 
@@ -166,16 +161,16 @@ bool TryDecrypt(Client client, ReadOnlyMemory<byte> data, out Memory<byte> decry
 {
     decryptedData = default;
 
-    if (data.Length < 17)
+    if (data.Length < AesGcm.TagByteSizes.MaxSize)
         return false;
 
     if (client.AesKey is null || client.AesIV is null)
         return false;
     if (client.Aes is null)
-        client.Aes = new(client.AesKey, 16);
+        client.Aes = new(client.AesKey, AesGcm.TagByteSizes.MaxSize);
 
-    decryptedData = new byte[data.Length - 16];
-    client.Aes.Decrypt(client.AesIV, data[..^16].Span, data[^16..].Span, decryptedData.Span);
+    decryptedData = new byte[data.Length - AesGcm.TagByteSizes.MaxSize];
+    client.Aes.Decrypt(client.AesIV, data[..^AesGcm.TagByteSizes.MaxSize].Span, data[^AesGcm.TagByteSizes.MaxSize..].Span, decryptedData.Span);
 
     return true;
 }
@@ -203,52 +198,60 @@ Task ProcessPacket(Client client, ReadOnlyMemory<byte> data, CancellationToken c
 
 async Task Punch(Client client, ReadOnlyMemory<byte> data, CancellationToken ct)
 {
-    var punch = Serializer.Deserialize<PunchOp>(data);
-    if (punch is null)
-        return;
+    var punch = PunchOp.Deserialize(data.Span);
+    client.IsQuerable = punch.IsQuerable;
 
     if (client.RemoteClient is null)
     {
         client.RemoteClient = new()
         {
             IpBytes = client.Endpoint.Address.GetAddressBytes(),
-            Port = client.Endpoint.Port,
-            Token = punch.Token,
+            Port = (ushort)client.Endpoint.Port,
+            Project = punch.Project,
             Name = punch.Name,
+            Password = punch.Password,
             Extra = punch.Extra,
             Tags = punch.Tags
         };
-        Clients.AddClientToGroup(client.Endpoint, client.RemoteClient.Token ?? string.Empty);
+        Clients.UpdateClientUuid(client);
+        Clients.AddClientToGroup(client.Endpoint, client.RemoteClient.Project ?? string.Empty);
         Console.WriteLine($"{client.RemoteClient.Name}@{client.Endpoint}: Handshake completed");
     }
     else
     {
-        if (client.RemoteClient.Token != punch.Token)
+        if (client.RemoteClient.Project != punch.Project)
         {
-            Clients.RemoveClientFromGroup(client.Endpoint, client.RemoteClient.Token ?? string.Empty);
-            client.RemoteClient.Token = punch.Token;
-            Clients.AddClientToGroup(client.Endpoint, client.RemoteClient.Token ?? string.Empty);
+            Clients.RemoveClientFromGroup(client.Endpoint, client.RemoteClient.Project ?? string.Empty);
+            client.RemoteClient.Project = punch.Project;
+            Clients.AddClientToGroup(client.Endpoint, client.RemoteClient.Project ?? string.Empty);
         }
 
         client.RemoteClient.Name = punch.Name;
+        client.RemoteClient.Password = punch.Password;
         client.RemoteClient.Extra = punch.Extra;
         client.RemoteClient.Tags = punch.Tags;
     }
-
 
     await EncryptAndSendOperation(client, EOperation.PunchRes, client.RemoteClient, ct);
 }
 
 async Task Query(Client client, ReadOnlyMemory<byte> data, CancellationToken ct)
 {
-    var query = Serializer.Deserialize<QueryOp>(data);
-    if (query is null)
-        return;
+    var query = QueryOp.Deserialize(data.Span);
 
-    var group = Clients.GetGroupByToken(query.Token ?? string.Empty);
+    var group = Clients.GetGroupByProject(query.Project ?? string.Empty);
 
-    var queryClients = group is null ? [] : query.Tags is null ? group.ToArray() : group.Where(c => c.RemoteClient is not null && query.Tags.All(t => c.RemoteClient.Tags is not null && c.RemoteClient.Tags.Contains(t)));
-    var queryRes = new QueryRes { Clients = queryClients.Where(x => x.RemoteClient is not null).Select(x => x.RemoteClient!).ToArray() };
+    var queryClients = group is null ? []
+                     : query.Tags is null ? group.ToArray()
+                     : group.Where(c => c.RemoteClient is not null && query.Tags.All(t => c.RemoteClient.Tags is not null && c.RemoteClient.Tags.Contains(t)));
+    queryClients = queryClients.Where(x => x.IsQuerable && x.RemoteClient is not null);
+
+    var queryRes = new QueryRes
+    {
+        PublicClients = queryClients.Where(x => x.RemoteClient!.Password is null).Select(x => x.RemoteClient!).ToArray(),
+        PrivateClients = queryClients.Where(x => x.RemoteClient!.Password is not null).Select(x => x.RemoteClient!.ToMin()).ToArray()
+    };
+
     await EncryptAndSendOperation(client, EOperation.QueryRes, queryRes, ct);
 }
 
@@ -257,27 +260,37 @@ async Task ConnectRemoteClients(Client client, ReadOnlyMemory<byte> data, Cancel
     if (client.RemoteClient is null || client.AesKey is null || client.AesIV is null)
         return;
 
-    var connect = Serializer.Deserialize<ConnectOp>(data);
-    if (connect is null)
-        return;
+    var connect = ConnectOp.Deserialize(data.Span);
 
-    if (!Clients.IsClientExists(connect.EndPoint))
+    var clientToConnect = Clients.GetClientByUuid(connect.Uuid);
+    if (clientToConnect is null || clientToConnect.RemoteClient is null || clientToConnect.AesKey is null || clientToConnect.AesIV is null)
         return;
-
-    var clientToConnect = Clients.GetClientByEndpoint(connect.EndPoint);
-    if (clientToConnect.RemoteClient is null)
+    if (clientToConnect.RemoteClient.Project != client.RemoteClient.Project)
         return;
-    if (clientToConnect.RemoteClient.Token != client.RemoteClient.Token)
+    if (clientToConnect.RemoteClient.Password != connect.Password)
         return;
-
-    var p2p = new P2POp
-    {
-        RemoteClient = client.RemoteClient,
-        AesKey = client.AesKey,
-        AesIV = client.AesIV
-    };
 
     Console.WriteLine($"Connecting {client.RemoteClient.Name}@{client.Endpoint} to {clientToConnect.RemoteClient.Name}@{clientToConnect.Endpoint}");
 
-    await EncryptAndSendOperation(clientToConnect, EOperation.P2P, p2p, ct);
+    {
+        var p2p = new P2POp
+        {
+            RemoteClient = client.RemoteClient,
+            AesKey = client.AesKey,
+            AesIV = client.AesIV
+        };
+
+        await EncryptAndSendOperation(clientToConnect, EOperation.P2P, p2p, ct);
+    }
+
+    {
+        var p2p = new P2POp
+        {
+            RemoteClient = clientToConnect.RemoteClient,
+            AesKey = clientToConnect.AesKey,
+            AesIV = clientToConnect.AesIV
+        };
+
+        await EncryptAndSendOperation(client, EOperation.P2P, p2p, ct);
+    }
 }

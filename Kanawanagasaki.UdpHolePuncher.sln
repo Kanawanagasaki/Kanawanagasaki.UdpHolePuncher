@@ -11,7 +11,9 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Kanawanagasaki.UdpHolePunch
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Kanawanagasaki.UdpHolePuncher.Sample", "Kanawanagasaki.UdpHolePuncher.Sample\Kanawanagasaki.UdpHolePuncher.Sample.csproj", "{22990B87-F9C5-484F-A344-4B6D1322A475}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kanawanagasaki.RUDP", "Kanawanagasaki.RUDP\Kanawanagasaki.RUDP.csproj", "{BCFA56EF-5359-4029-8C3D-6C715995D56B}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Kanawanagasaki.RUDP", "Kanawanagasaki.RUDP\Kanawanagasaki.RUDP.csproj", "{BCFA56EF-5359-4029-8C3D-6C715995D56B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kanawanagasaki.UdpHolePuncher.Test", "Kanawanagasaki.UdpHolePuncher.Test\Kanawanagasaki.UdpHolePuncher.Test.csproj", "{FECDC5EC-8511-42DB-BD7A-44E3413071F3}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -39,6 +41,10 @@ Global
 		{BCFA56EF-5359-4029-8C3D-6C715995D56B}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{BCFA56EF-5359-4029-8C3D-6C715995D56B}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{BCFA56EF-5359-4029-8C3D-6C715995D56B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FECDC5EC-8511-42DB-BD7A-44E3413071F3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FECDC5EC-8511-42DB-BD7A-44E3413071F3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FECDC5EC-8511-42DB-BD7A-44E3413071F3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FECDC5EC-8511-42DB-BD7A-44E3413071F3}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
