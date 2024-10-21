@@ -143,7 +143,7 @@ public class HolePuncherClient : IAsyncDisposable
     public Task Connect(RemoteClientMin client, string? password, CancellationToken ct)
         => Connect(client.Uuid, password, ct);
 
-    private Task Connect(Guid uuid, string? password, CancellationToken ct)
+    public Task Connect(Guid uuid, string? password, CancellationToken ct)
     {
         _toConnect.AddOrUpdate(uuid, (Stopwatch.GetTimestamp(), password), (_, _) => (Stopwatch.GetTimestamp(), password));
         var connect = new ConnectOp { Uuid = uuid, Password = password };
@@ -463,8 +463,7 @@ public class HolePuncherClient : IAsyncDisposable
                         _connectedClients.AddOrUpdate(p2pClient.EndPoint, p2pClient, (_, _) => p2pClient);
                     }
 
-                    if (p2pClient.ConnectionStatus == EConnectionStatus.Handshake)
-                        await EncryptAndSendOperation(p2pClient, EOperation.HandshakeAck, ct);
+                    await EncryptAndSendOperation(p2pClient, EOperation.HandshakeAck, ct);
 
                     break;
                 }

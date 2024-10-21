@@ -110,6 +110,7 @@ public class SerializationTest(ITestOutputHelper _output)
             Name = name,
             Password = password,
             Extra = extra,
+            PublicExtra = extra?.Reverse().ToArray(),
             Tags = tags
         };
 
@@ -133,6 +134,7 @@ public class SerializationTest(ITestOutputHelper _output)
         {
             Project = project,
             Name = name,
+            PublicExtra = RandomNumberGenerator.GetBytes(Random.Shared.Next(10, 50)),
             Tags = tags
         };
 
@@ -180,15 +182,17 @@ public class SerializationTest(ITestOutputHelper _output)
     }
 
     [Theory]
-    [InlineData("hello", null)]
-    [InlineData("world", new string[] { "Hello", "World" })]
-    [InlineData("123", new string[] { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" })]
-    public void QueryOpTest(string project, string[]? tags)
+    [InlineData("hello", null, 99999, QueryOp.EVisibility.Private)]
+    [InlineData("world", new string[] { "Hello", "World" }, 0, QueryOp.EVisibility.Public)]
+    [InlineData("123", new string[] { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" }, -123123123, QueryOp.EVisibility.Unset)]
+    public void QueryOpTest(string project, string[]? tags, int skip, QueryOp.EVisibility visibility)
     {
         var queryOp = new QueryOp
         {
             Project = project,
-            Tags = tags
+            Tags = tags,
+            Offset = skip,
+            Visibility = visibility
         };
 
         var size = queryOp.GetSerializedSize();
@@ -199,6 +203,8 @@ public class SerializationTest(ITestOutputHelper _output)
 
         Assert.Equal(queryOp.Project, newQueryOp.Project);
         Assert.Equal(queryOp.Tags, newQueryOp.Tags);
+        Assert.Equal(queryOp.Offset, newQueryOp.Offset);
+        Assert.Equal(queryOp.Visibility, newQueryOp.Visibility);
     }
 
     [Fact]
@@ -221,7 +227,9 @@ public class SerializationTest(ITestOutputHelper _output)
                 Password = Random.Shared.NextDouble() < 0.5 ? null : "password",
                 Extra = RandomNumberGenerator.GetBytes(Random.Shared.Next(1, 100)),
                 Tags = Random.Shared.NextDouble() < 0.5 ? null : ["Hello", "World"]
-            }).ToArray()
+            }).ToArray(),
+            Offset = Random.Shared.Next(5, 50),
+            Total = Random.Shared.Next(50, 10000),
         };
 
         var size = queryRes.GetSerializedSize();
@@ -238,6 +246,9 @@ public class SerializationTest(ITestOutputHelper _output)
         foreach (var (one, two) in queryRes.PublicClients.Zip(newQueryRes.PublicClients))
             AssertPrivateRemoteClients(one, two);
 
+        Assert.Equal(queryRes.Offset, newQueryRes.Offset);
+        Assert.Equal(queryRes.Total, newQueryRes.Total);
+
         _output.WriteLine($"PrivateClients.Length: {queryRes.PrivateClients.Length}, PublicClients.Length: {queryRes.PublicClients.Length}, bytes size: {bytes.Length}");
     }
 
@@ -250,6 +261,7 @@ public class SerializationTest(ITestOutputHelper _output)
         Assert.Equal(one.Name, two.Name);
         Assert.Equal(one.Password, two.Password);
         Assert.Equal(one.Extra, two.Extra);
+        Assert.Equal(one.PublicExtra, two.PublicExtra);
         Assert.Equal(one.Tags, two.Tags);
     }
 
@@ -258,6 +270,7 @@ public class SerializationTest(ITestOutputHelper _output)
         Assert.Equal(one.Uuid, two.Uuid);
         Assert.Equal(one.Project, two.Project);
         Assert.Equal(one.Name, two.Name);
+        Assert.Equal(one.PublicExtra, two.PublicExtra);
         Assert.Equal(one.Tags, two.Tags);
     }
 }

@@ -12,6 +12,7 @@ public class RemoteClient : ISerializable
     public string? Name { get; set; }
     public string? Password { get; set; }
     public byte[]? Extra { get; set; }
+    public byte[]? PublicExtra { get; set; }
     public string[]? Tags { get; set; }
 
     public IPAddress Ip => new IPAddress(IpBytes);
@@ -23,6 +24,7 @@ public class RemoteClient : ISerializable
             Uuid = Uuid,
             Project = Project,
             Name = Name,
+            PublicExtra = PublicExtra,
             Tags = Tags
         };
 
@@ -38,7 +40,8 @@ public class RemoteClient : ISerializable
         + (Name is not null ? 2 + Encoding.UTF8.GetByteCount(Name) : 0)                         // name
         + (Password is not null ? 2 + Encoding.UTF8.GetByteCount(Password) : 0)                 // password
         + (Extra is not null ? 2 + Extra.Length : 0)                                            // extra
-        + (Tags is not null ? 2 + Tags.Length * 2 + Tags.Sum(Encoding.UTF8.GetByteCount) : 0);  // tags;
+        + (PublicExtra is not null ? 2 + PublicExtra.Length : 0)                                // public extra
+        + (Tags is not null ? 2 + Tags.Length * 2 + Tags.Sum(Encoding.UTF8.GetByteCount) : 0);  // tags
 
     public void Serialize(Span<byte> span)
     {
@@ -46,14 +49,16 @@ public class RemoteClient : ISerializable
         var hasName = Name is not null;
         var hasPassword = Password is not null;
         var hasExtra = Extra is not null;
+        var hasPublicExtra = PublicExtra is not null;
         var hasTags = Tags is not null;
         
 #pragma warning disable format
-        var flags = (isIpV6      ? 0b10000000 : 0)
-                  | (hasName     ? 0b01000000 : 0)
-                  | (hasPassword ? 0b00100000 : 0)
-                  | (hasExtra    ? 0b00010000 : 0)
-                  | (hasTags     ? 0b00001000 : 0);
+        var flags = (isIpV6         ? 0b10000000 : 0)
+                  | (hasName        ? 0b01000000 : 0)
+                  | (hasPassword    ? 0b00100000 : 0)
+                  | (hasExtra       ? 0b00010000 : 0)
+                  | (hasPublicExtra ? 0b00001000 : 0)
+                  | (hasTags        ? 0b00000100 : 0);
 #pragma warning restore format
 
         span[0] = (byte)flags;
@@ -101,6 +106,14 @@ public class RemoteClient : ISerializable
             offset += Extra.Length;
         }
 
+        if (PublicExtra is not null)
+        {
+            span[offset++] = (byte)((PublicExtra.Length >> 8) & 0xFF);
+            span[offset++] = (byte)(PublicExtra.Length & 0xFF);
+            PublicExtra.CopyTo(span[offset..(offset + PublicExtra.Length)]);
+            offset += PublicExtra.Length;
+        }
+
         if (Tags is not null)
         {
             span[offset++] = (byte)((Tags.Length >> 8) & 0xFF);
@@ -119,11 +132,12 @@ public class RemoteClient : ISerializable
     public static RemoteClient Deserialize(ReadOnlySpan<byte> span)
     {
 #pragma warning disable format
-        var isIpV6 =      (span[0] & 0b10000000) != 0;
-        var hasName =     (span[0] & 0b01000000) != 0;
-        var hasPassword = (span[0] & 0b00100000) != 0;
-        var hasExtra =    (span[0] & 0b00010000) != 0;
-        var hasTags =     (span[0] & 0b00001000) != 0;
+        var isIpV6 =         (span[0] & 0b10000000) != 0;
+        var hasName =        (span[0] & 0b01000000) != 0;
+        var hasPassword =    (span[0] & 0b00100000) != 0;
+        var hasExtra =       (span[0] & 0b00010000) != 0;
+        var hasPublicExtra = (span[0] & 0b00001000) != 0;
+        var hasTags =        (span[0] & 0b00000100) != 0;
 #pragma warning restore format
 
         var offset = 1;
@@ -164,6 +178,14 @@ public class RemoteClient : ISerializable
             offset += extraLen;
         }
 
+        byte[]? publicExtra = null;
+        if (hasPublicExtra)
+        {
+            var publicExtraLen = (span[offset++] << 8) | span[offset++];
+            publicExtra = span[offset..(offset + publicExtraLen)].ToArray();
+            offset += publicExtraLen;
+        }
+
         string[]? tags = null;
         if (hasTags)
         {
@@ -186,6 +208,7 @@ public class RemoteClient : ISerializable
             Name = name,
             Password = password,
             Extra = extra,
+            PublicExtra = publicExtra,
             Tags = tags
         };
     }

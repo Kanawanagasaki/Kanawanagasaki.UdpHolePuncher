@@ -8,11 +8,15 @@ public class QueryOp : ISerializable
 {
     public required string Project { get; init; }
     public string[]? Tags { get; init; }
+    public int Offset { get; init; } = 0;
+    public EVisibility Visibility { get; init; } = EVisibility.Unset;
 
     public int GetSerializedSize()
-    => 1                                                                                    // flags
-    + 2 + Encoding.UTF32.GetByteCount(Project)                                              // project
-    + (Tags is not null ? 2 + Tags.Length * 2 + Tags.Sum(Encoding.UTF8.GetByteCount) : 0);  // tags;
+        => 1                                                                                    // flags
+        + 2 + Encoding.UTF32.GetByteCount(Project)                                              // project
+        + (Tags is not null ? 2 + Tags.Length * 2 + Tags.Sum(Encoding.UTF8.GetByteCount) : 0)   // tags
+        + 4                                                                                     // skip
+        + 1;                                                                                    // visibility
 
     public void Serialize(Span<byte> span)
     {
@@ -41,6 +45,13 @@ public class QueryOp : ISerializable
                 offset += tagLen;
             }
         }
+
+        span[offset++] = (byte)((Offset >> 24) & 0xFF);
+        span[offset++] = (byte)((Offset >> 16) & 0xFF);
+        span[offset++] = (byte)((Offset >> 8) & 0xFF);
+        span[offset++] = (byte)(Offset & 0xFF);
+
+        span[offset++] = (byte)Visibility;
     }
 
     public static QueryOp Deserialize(ReadOnlySpan<byte> span)
@@ -66,10 +77,21 @@ public class QueryOp : ISerializable
             }
         }
 
+        var clientsOffset = (span[offset++] << 24) | (span[offset++] << 16) | (span[offset++] << 8) | span[offset++];
+
+        var visibility = (EVisibility)span[offset++];
+
         return new()
         {
             Project = project,
-            Tags = tags
+            Tags = tags,
+            Offset = clientsOffset,
+            Visibility = visibility
         };
+    }
+
+    public enum EVisibility : byte
+    {
+        Unset, Private, Public
     }
 }

@@ -245,11 +245,41 @@ async Task Query(Client client, ReadOnlyMemory<byte> data, CancellationToken ct)
                      : query.Tags is null ? group.ToArray()
                      : group.Where(c => c.RemoteClient is not null && query.Tags.All(t => c.RemoteClient.Tags is not null && c.RemoteClient.Tags.Contains(t)));
     queryClients = queryClients.Where(x => x.IsQuerable && x.RemoteClient is not null);
+    if (query.Visibility == QueryOp.EVisibility.Public)
+        queryClients.Where(x => x.RemoteClient!.Password is null);
+    else if (query.Visibility == QueryOp.EVisibility.Private)
+        queryClients.Where(x => x.RemoteClient!.Password is not null);
+    var count = queryClients.Count();
+
+    var publicClients = new List<RemoteClient>();
+    var privateClients = new List<RemoteClientMin>();
+
+    var packetSize = 0;
+    foreach (var networkClient in queryClients.Skip(query.Offset))
+    {
+        if (networkClient.RemoteClient!.Password is null)
+        {
+            packetSize += networkClient.RemoteClient.GetSerializedSize();
+            if (1280 < packetSize && (0 < publicClients.Count || 0 < privateClients.Count))
+                break;
+            publicClients.Add(networkClient.RemoteClient);
+        }
+        else
+        {
+            var min = networkClient.RemoteClient.ToMin();
+            packetSize += min.GetSerializedSize();
+            if (1280 < packetSize && (0 < publicClients.Count || 0 < privateClients.Count))
+                break;
+            privateClients.Add(min);
+        }
+    }
 
     var queryRes = new QueryRes
     {
-        PublicClients = queryClients.Where(x => x.RemoteClient!.Password is null).Select(x => x.RemoteClient!).ToArray(),
-        PrivateClients = queryClients.Where(x => x.RemoteClient!.Password is not null).Select(x => x.RemoteClient!.ToMin()).ToArray()
+        PublicClients = publicClients.ToArray(),
+        PrivateClients = privateClients.ToArray(),
+        Offset = query.Offset,
+        Total = count
     };
 
     await EncryptAndSendOperation(client, EOperation.QueryRes, queryRes, ct);

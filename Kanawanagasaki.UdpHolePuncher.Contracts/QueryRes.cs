@@ -6,12 +6,16 @@ public class QueryRes : ISerializable
 {
     public required RemoteClientMin[] PrivateClients { get; init; }
     public required RemoteClient[] PublicClients { get; init; }
+    public int Offset { get; init; }
+    public int Total { get; init; }
 
     public int GetSerializedSize()
         => 2
         + PrivateClients.Sum(x => 2 + x.GetSerializedSize())
         + 2
-        + PublicClients.Sum(x => 2 + x.GetSerializedSize());
+        + PublicClients.Sum(x => 2 + x.GetSerializedSize())
+        + 4
+        + 4;
 
     public void Serialize(Span<byte> span)
     {
@@ -44,6 +48,16 @@ public class QueryRes : ISerializable
             client.Serialize(span[offset..(offset + size)]);
             offset += size;
         }
+
+        span[offset++] = (byte)((Offset >> 24) & 0xFF);
+        span[offset++] = (byte)((Offset >> 16) & 0xFF);
+        span[offset++] = (byte)((Offset >> 8) & 0xFF);
+        span[offset++] = (byte)(Offset & 0xFF);
+
+        span[offset++] = (byte)((Total >> 24) & 0xFF);
+        span[offset++] = (byte)((Total >> 16) & 0xFF);
+        span[offset++] = (byte)((Total >> 8) & 0xFF);
+        span[offset++] = (byte)(Total & 0xFF);
     }
 
     public static QueryRes Deserialize(ReadOnlySpan<byte> span)
@@ -68,10 +82,15 @@ public class QueryRes : ISerializable
             offset += clientLen;
         }
 
+        var clientsOffset = (span[offset++] << 24) | (span[offset++] << 16) | (span[offset++] << 8) | span[offset++];
+        var totalCount = (span[offset++] << 24) | (span[offset++] << 16) | (span[offset++] << 8) | span[offset++];
+
         return new()
         {
             PrivateClients = privateClients,
-            PublicClients = publicClients
+            PublicClients = publicClients,
+            Offset = clientsOffset,
+            Total = totalCount
         };
     }
 }
