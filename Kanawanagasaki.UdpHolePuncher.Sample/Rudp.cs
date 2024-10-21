@@ -32,15 +32,15 @@ public class Rudp
 
         await using var rudp1 = new RudpClient(hp1, hp2.PunchResult)
         {
-            DebugDropPackets = false,
-            DebugDropPacketsChance = 0.1d
+            DebugDropPackets = true,
+            DebugDropPacketsChance = 0.05d
         };
         rudp1.OnDatagram += (c, x) => Console.Write(Encoding.UTF8.GetString(x.Span));
 
         await using var rudp2 = new RudpClient(hp2, hp1.PunchResult)
         {
-            DebugDropPackets = false,
-            DebugDropPacketsChance = 0.1d
+            DebugDropPackets = true,
+            DebugDropPacketsChance = 0.05d
         };
         rudp2.OnDatagram += (c, x) => Console.Write(Encoding.UTF8.GetString(x.Span));
 

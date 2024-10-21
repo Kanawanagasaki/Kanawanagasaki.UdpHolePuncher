@@ -254,7 +254,12 @@ public class HolePuncherClient : IAsyncDisposable
                     foreach (var (endpoint, p2pClient) in _connectedClients)
                     {
                         if (Stopwatch.GetElapsedTime(p2pClient.LastTimePing) < InactiveClientsDisconnectTimeSpan)
-                            await SendPacket(endpoint, EPacketType.Ping, ct);
+                        {
+                            if (p2pClient.ConnectionStatus == EConnectionStatus.Handshake)
+                                await EncryptAndSendOperation(p2pClient, EOperation.Handshake, ct);
+                            else
+                                await SendPacket(endpoint, EPacketType.Ping, ct);
+                        }
                         else
                         {
                             _connectedClients.TryRemove(endpoint, out _);
@@ -463,7 +468,14 @@ public class HolePuncherClient : IAsyncDisposable
                         _connectedClients.AddOrUpdate(p2pClient.EndPoint, p2pClient, (_, _) => p2pClient);
                     }
 
-                    await EncryptAndSendOperation(p2pClient, EOperation.HandshakeAck, ct);
+                    await EncryptAndSendOperation(p2pClient, EOperation.Handshake, ct);
+
+                    break;
+                }
+            case EOperation.Handshake:
+                {
+                    if (_connectedClients.TryGetValue(endpoint, out var p2pClient))
+                        await EncryptAndSendOperation(p2pClient, EOperation.HandshakeAck, ct);
 
                     break;
                 }

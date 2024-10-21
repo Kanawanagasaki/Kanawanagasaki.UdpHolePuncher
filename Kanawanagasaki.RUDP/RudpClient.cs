@@ -51,7 +51,7 @@ public class RudpClient : IAsyncDisposable
 
         RemoteClient = remoteClient;
 
-        _tickTimer = new(TimeSpan.FromSeconds(2));
+        _tickTimer = new(TimeSpan.FromSeconds(1));
         _tickCts = new CancellationTokenSource();
         _tickTask = TickAsync();
     }
@@ -191,7 +191,20 @@ public class RudpClient : IAsyncDisposable
         => HolePuncher.SendTo(RemoteClient, [(byte)dataType, .. data], ct);
 
     public Task SendReliableDatagramAsync(byte[] data, CancellationToken ct)
-        => SendReliableDatagramInternalAsync(data, false, ct);
+    {
+        var id = Interlocked.Increment(ref _outgoingReliablePacketId);
+        byte[] packet =
+        [
+            (byte)EDataType.ReliableDatagram,
+            (byte)((id >> 24) & 0xFF),
+            (byte)((id >> 16) & 0xFF),
+            (byte)((id >> 8) & 0xFF),
+            (byte)(id & 0xFF),
+            ..data
+        ];
+
+        return SendReliablePacketAsync(id, packet, ct);
+    }
 
     public async Task WriteAsync(byte[] data, CancellationToken ct)
     {
@@ -202,39 +215,30 @@ public class RudpClient : IAsyncDisposable
             {
                 var chunkSize = Math.Min(1280, data.Length - offset);
 
+                var id = Interlocked.Increment(ref _outgoingReliablePacketId);
                 var order = ++_streamOutgoingOrder;
-                byte[] chunk =
+                byte[] packet =
                 [
+                    (byte)(EDataType.ReliableDatagram | EDataType.Stream),
+                    (byte)((id >> 24) & 0xFF),
+                    (byte)((id >> 16) & 0xFF),
+                    (byte)((id >> 8) & 0xFF),
+                    (byte)(id & 0xFF),
                     (byte)((order >> 24) & 0xFF),
                     (byte)((order >> 16) & 0xFF),
                     (byte)((order >> 8) & 0xFF),
                     (byte)(order & 0xFF),
                     ..data[offset..(offset + chunkSize)]
                 ];
-                await SendReliableDatagramInternalAsync(chunk, true, ct);
+
+                _reliablePacketsBuffer.Enqueue((id, packet));
             }
+            await DrainReliablePacketsBufferAsync(ct);
         }
         finally
         {
             _streamSemaphore.Release();
         }
-    }
-
-    private Task SendReliableDatagramInternalAsync(byte[] data, bool isStream, CancellationToken ct)
-    {
-        var id = Interlocked.Increment(ref _outgoingReliablePacketId);
-        byte[] packet =
-        [
-            isStream ? (byte)(EDataType.ReliableDatagram | EDataType.Stream) : (byte)EDataType.ReliableDatagram,
-            (byte)((id >> 24) & 0xFF),
-            (byte)((id >> 16) & 0xFF),
-            (byte)((id >> 8) & 0xFF),
-            (byte)(id & 0xFF),
-            ..data
-        ];
-
-        _reliablePacketsBuffer.Enqueue((id, packet));
-        return DrainReliablePacketsBufferAsync(ct);
     }
 
     private async Task DrainReliablePacketsBufferAsync(CancellationToken ct)
