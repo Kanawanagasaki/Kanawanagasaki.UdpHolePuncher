@@ -47,6 +47,9 @@ public class HolePuncherClient : IAsyncDisposable
     public UdpClient UdpClient { get; }
 
     public RemoteClient? PunchResult { get; private set; }
+    private long _punchTime = 0;
+    private long _punchResultTime = 0;
+    public TimeSpan ServerPing { get; private set; }
 
     private readonly IPEndPoint _serverEndPoint;
     public EConnectionStatus ServerConnectionStatus { get; private set; } = EConnectionStatus.Disconnected;
@@ -240,15 +243,34 @@ public class HolePuncherClient : IAsyncDisposable
                     var ct = _tickCts.Token;
                     await Punch(ct);
 
-                    foreach (var (uuid, (timeAdded, password)) in _toConnect)
+                    if (_punchResultTime < _punchTime && InactiveClientsDisconnectTimeSpan < Stopwatch.GetElapsedTime(_punchResultTime, _punchTime))
                     {
-                        if (Stopwatch.GetElapsedTime(timeAdded) < InactiveClientsDisconnectTimeSpan)
+                        await SendPacket(_serverEndPoint, EPacketType.Disconnect, ct);
+                        ServerConnectionStatus = EConnectionStatus.Disconnected;
+
+                        _serverPublicKeyTcs?.TrySetCanceled();
+                        _serverPublicKeyTcs = null;
+
+                        _serverHandshakeCompleteTcs?.TrySetCanceled();
+                        _serverHandshakeCompleteTcs = null;
+
+                        _queryResTcs?.TrySetCanceled();
+                        _queryResTcs = null;
+
+                        _toConnect.Clear();
+                    }
+                    else
+                    {
+                        foreach (var (uuid, (timeAdded, password)) in _toConnect)
                         {
-                            var connect = new ConnectOp { Uuid = uuid, Password = password };
-                            await EncryptAndSendOperationToServer(EOperation.Connect, connect, ct);
+                            if (Stopwatch.GetElapsedTime(timeAdded) < InactiveClientsDisconnectTimeSpan)
+                            {
+                                var connect = new ConnectOp { Uuid = uuid, Password = password };
+                                await EncryptAndSendOperationToServer(EOperation.Connect, connect, ct);
+                            }
+                            else
+                                _toConnect.TryRemove(uuid, out _);
                         }
-                        else
-                            _toConnect.TryRemove(uuid, out _);
                     }
 
                     foreach (var (endpoint, p2pClient) in _connectedClients)
@@ -288,6 +310,7 @@ public class HolePuncherClient : IAsyncDisposable
         };
 
         await EncryptAndSendOperationToServer(EOperation.Punch, punch, ct);
+        _punchTime = Stopwatch.GetTimestamp();
     }
 
     public async Task<QueryRes?> Query(string[]? tags, TimeSpan timeout, CancellationToken ct)
@@ -427,6 +450,8 @@ public class HolePuncherClient : IAsyncDisposable
             case EOperation.PunchRes:
                 {
                     PunchResult = RemoteClient.Deserialize(data[2..].Span);
+                    _punchResultTime = Stopwatch.GetTimestamp();
+                    ServerPing = Stopwatch.GetElapsedTime(_punchTime, _punchResultTime);
                     break;
                 }
             case EOperation.QueryRes:

@@ -26,16 +26,15 @@ public class RemoteClientMin : ISerializable
         var hasName = Name is not null;
         var hasPublicExtra = PublicExtra is not null;
         var hasTags = Tags is not null;
-        
-#pragma warning disable format
-        var flags = (hasName        ? 0b01000000 : 0)
-                  | (hasPublicExtra ? 0b00001000 : 0)
-                  | (hasTags        ? 0b00000100 : 0);
-#pragma warning restore format
 
-        span[0] = (byte)flags;
+        var offset = 0;
 
-        var offset = 1;
+        var flags = (hasName ? EPartFlag.HasName : EPartFlag.None)
+                  | (hasPublicExtra ? EPartFlag.HasPublicExtra : EPartFlag.None)
+                  | (hasTags ? EPartFlag.HasTags : EPartFlag.None);
+
+        span[offset++] = (byte)flags;
+
 
         Uuid.TryWriteBytes(span[offset..(offset + 16)]);
         offset += 16;
@@ -80,13 +79,9 @@ public class RemoteClientMin : ISerializable
 
     public static RemoteClientMin Deserialize(ReadOnlySpan<byte> span)
     {
-#pragma warning disable format
-        var hasName =        (span[0] & 0b01000000) != 0;
-        var hasPublicExtra = (span[0] & 0b00001000) != 0;
-        var hasTags =        (span[0] & 0b00000100) != 0;
-#pragma warning restore format
+        var offset = 0;
 
-        var offset = 1;
+        var flags = (EPartFlag)span[offset++];
 
         var uuid = span[offset..(offset + 16)];
         offset += uuid.Length;
@@ -96,7 +91,7 @@ public class RemoteClientMin : ISerializable
         offset += projectLen;
 
         string? name = null;
-        if (hasName)
+        if (flags.HasFlag(EPartFlag.HasName))
         {
             var nameLen = (span[offset++] << 8) | span[offset++];
             name = Encoding.UTF8.GetString(span[offset..(offset + nameLen)]);
@@ -104,7 +99,7 @@ public class RemoteClientMin : ISerializable
         }
 
         byte[]? publicExtra = null;
-        if (hasPublicExtra)
+        if (flags.HasFlag(EPartFlag.HasPublicExtra))
         {
             var publicExtraLen = (span[offset++] << 8) | span[offset++];
             publicExtra = span[offset..(offset + publicExtraLen)].ToArray();
@@ -112,7 +107,7 @@ public class RemoteClientMin : ISerializable
         }
 
         string[]? tags = null;
-        if (hasTags)
+        if (flags.HasFlag(EPartFlag.HasTags))
         {
             var tagsNumber = (span[offset++] << 8) | span[offset++];
             tags = new string[tagsNumber];

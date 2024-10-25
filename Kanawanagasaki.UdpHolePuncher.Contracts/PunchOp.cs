@@ -10,6 +10,7 @@ public class PunchOp : ISerializable
     public string? Name { get; init; }
     public string? Password { get; init; }
     public byte[]? Extra { get; init; }
+    public byte[]? PublicExtra { get; init; }
     public string[]? Tags { get; init; }
 
     public int GetSerializedSize()
@@ -18,6 +19,7 @@ public class PunchOp : ISerializable
         + (Name is not null ? 2 + Encoding.UTF8.GetByteCount(Name) : 0)                         // name
         + (Password is not null ? 2 + Encoding.UTF8.GetByteCount(Password) : 0)                 // password
         + (Extra is not null ? 2 + Extra.Length : 0)                                            // extra
+        + (PublicExtra is not null ? 2 + PublicExtra.Length : 0)                                // public extra
         + (Tags is not null ? 2 + Tags.Length * 2 + Tags.Sum(Encoding.UTF8.GetByteCount) : 0);  // tags;
 
     public void Serialize(Span<byte> span)
@@ -25,19 +27,19 @@ public class PunchOp : ISerializable
         var hasName = Name is not null;
         var hasPassword = Password is not null;
         var hasExtra = Extra is not null;
+        var hasPublicExtra = PublicExtra is not null;
         var hasTags = Tags is not null;
-        
-#pragma warning disable format
-        var flags = (hasName     ? 0b01000000 : 0)
-                  | (hasPassword ? 0b00100000 : 0)
-                  | (hasExtra    ? 0b00010000 : 0)
-                  | (hasTags     ? 0b00001000 : 0)
-                  | (IsQuerable  ? 0b00000100 : 0);
-#pragma warning restore format
 
-        span[0] = (byte)flags;
+        var offset = 0;
 
-        var offset = 1;
+        var flags = (hasName ? EPartFlag.HasName : EPartFlag.None)
+                  | (hasPassword ? EPartFlag.HasPassword : EPartFlag.None)
+                  | (hasExtra ? EPartFlag.HasExtra : EPartFlag.None)
+                  | (hasPublicExtra ? EPartFlag.HasPublicExtra : EPartFlag.None)
+                  | (hasTags ? EPartFlag.HasTags : EPartFlag.None)
+                  | (IsQuerable ? EPartFlag.IsQuerable : EPartFlag.None);
+
+        span[offset++] = (byte)flags;
 
         var projectLen = Encoding.UTF8.GetByteCount(Project);
         span[offset++] = (byte)((projectLen >> 8) & 0xFF);
@@ -71,6 +73,14 @@ public class PunchOp : ISerializable
             offset += Extra.Length;
         }
 
+        if (PublicExtra is not null)
+        {
+            span[offset++] = (byte)((PublicExtra.Length >> 8) & 0xFF);
+            span[offset++] = (byte)(PublicExtra.Length & 0xFF);
+            PublicExtra.CopyTo(span[offset..(offset + PublicExtra.Length)]);
+            offset += PublicExtra.Length;
+        }
+
         if (Tags is not null)
         {
             span[offset++] = (byte)((Tags.Length >> 8) & 0xFF);
@@ -88,22 +98,16 @@ public class PunchOp : ISerializable
 
     public static PunchOp Deserialize(ReadOnlySpan<byte> span)
     {
-#pragma warning disable format
-        var hasName =     (span[0] & 0b01000000) != 0;
-        var hasPassword = (span[0] & 0b00100000) != 0;
-        var hasExtra =    (span[0] & 0b00010000) != 0;
-        var hasTags =     (span[0] & 0b00001000) != 0;
-        var isQuerable =  (span[0] & 0b00000100) != 0;
-#pragma warning restore format
+        var offset = 0;
 
-        var offset = 1;
+        var flags = (EPartFlag)span[offset++];
 
         var projectLen = (span[offset++] << 8) | span[offset++];
         var project = Encoding.UTF8.GetString(span[offset..(offset + projectLen)]);
         offset += projectLen;
 
         string? name = null;
-        if (hasName)
+        if (flags.HasFlag(EPartFlag.HasName))
         {
             var nameLen = (span[offset++] << 8) | span[offset++];
             name = Encoding.UTF8.GetString(span[offset..(offset + nameLen)]);
@@ -111,7 +115,7 @@ public class PunchOp : ISerializable
         }
 
         string? password = null;
-        if (hasPassword)
+        if (flags.HasFlag(EPartFlag.HasPassword))
         {
             var passwordLen = (span[offset++] << 8) | span[offset++];
             password = Encoding.UTF8.GetString(span[offset..(offset + passwordLen)]);
@@ -119,15 +123,23 @@ public class PunchOp : ISerializable
         }
 
         byte[]? extra = null;
-        if (hasExtra)
+        if (flags.HasFlag(EPartFlag.HasExtra))
         {
             var extraLen = (span[offset++] << 8) | span[offset++];
             extra = span[offset..(offset + extraLen)].ToArray();
             offset += extraLen;
         }
 
+        byte[]? publicExtra = null;
+        if (flags.HasFlag(EPartFlag.HasPublicExtra))
+        {
+            var publicExtraLen = (span[offset++] << 8) | span[offset++];
+            publicExtra = span[offset..(offset + publicExtraLen)].ToArray();
+            offset += publicExtraLen;
+        }
+
         string[]? tags = null;
-        if (hasTags)
+        if (flags.HasFlag(EPartFlag.HasTags))
         {
             var tagsNumber = (span[offset++] << 8) | span[offset++];
             tags = new string[tagsNumber];
@@ -141,11 +153,12 @@ public class PunchOp : ISerializable
 
         return new()
         {
-            IsQuerable = isQuerable,
+            IsQuerable = flags.HasFlag(EPartFlag.IsQuerable),
             Project = project,
             Name = name,
             Password = password,
             Extra = extra,
+            PublicExtra = publicExtra,
             Tags = tags
         };
     }

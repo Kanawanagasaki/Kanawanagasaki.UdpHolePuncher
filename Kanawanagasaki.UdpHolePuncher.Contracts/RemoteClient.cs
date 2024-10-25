@@ -51,15 +51,13 @@ public class RemoteClient : ISerializable
         var hasExtra = Extra is not null;
         var hasPublicExtra = PublicExtra is not null;
         var hasTags = Tags is not null;
-        
-#pragma warning disable format
-        var flags = (isIpV6         ? 0b10000000 : 0)
-                  | (hasName        ? 0b01000000 : 0)
-                  | (hasPassword    ? 0b00100000 : 0)
-                  | (hasExtra       ? 0b00010000 : 0)
-                  | (hasPublicExtra ? 0b00001000 : 0)
-                  | (hasTags        ? 0b00000100 : 0);
-#pragma warning restore format
+
+        var flags = (isIpV6 ? EPartFlag.IsIpV6 : EPartFlag.None)
+                  | (hasName ? EPartFlag.HasName : EPartFlag.None)
+                  | (hasPassword ? EPartFlag.HasPassword : EPartFlag.None)
+                  | (hasExtra ? EPartFlag.HasExtra : EPartFlag.None)
+                  | (hasPublicExtra ? EPartFlag.HasPublicExtra : EPartFlag.None)
+                  | (hasTags ? EPartFlag.HasTags : EPartFlag.None);
 
         span[0] = (byte)flags;
 
@@ -131,21 +129,14 @@ public class RemoteClient : ISerializable
 
     public static RemoteClient Deserialize(ReadOnlySpan<byte> span)
     {
-#pragma warning disable format
-        var isIpV6 =         (span[0] & 0b10000000) != 0;
-        var hasName =        (span[0] & 0b01000000) != 0;
-        var hasPassword =    (span[0] & 0b00100000) != 0;
-        var hasExtra =       (span[0] & 0b00010000) != 0;
-        var hasPublicExtra = (span[0] & 0b00001000) != 0;
-        var hasTags =        (span[0] & 0b00000100) != 0;
-#pragma warning restore format
+        var offset = 0;
 
-        var offset = 1;
+        var flags = (EPartFlag)span[offset++];
 
         var uuid = span[offset..(offset + 16)];
         offset += uuid.Length;
 
-        var ip = isIpV6 ? span[offset..(offset + 16)] : span[offset..(offset + 4)];
+        var ip = flags.HasFlag(EPartFlag.IsIpV6) ? span[offset..(offset + 16)] : span[offset..(offset + 4)];
         offset += ip.Length;
 
         var port = (span[offset++] << 8) | span[offset++];
@@ -155,7 +146,7 @@ public class RemoteClient : ISerializable
         offset += projectLen;
 
         string? name = null;
-        if (hasName)
+        if (flags.HasFlag(EPartFlag.HasName))
         {
             var nameLen = (span[offset++] << 8) | span[offset++];
             name = Encoding.UTF8.GetString(span[offset..(offset + nameLen)]);
@@ -163,7 +154,7 @@ public class RemoteClient : ISerializable
         }
 
         string? password = null;
-        if (hasPassword)
+        if (flags.HasFlag(EPartFlag.HasPassword))
         {
             var passwordLen = (span[offset++] << 8) | span[offset++];
             password = Encoding.UTF8.GetString(span[offset..(offset + passwordLen)]);
@@ -171,7 +162,7 @@ public class RemoteClient : ISerializable
         }
 
         byte[]? extra = null;
-        if (hasExtra)
+        if (flags.HasFlag(EPartFlag.HasExtra))
         {
             var extraLen = (span[offset++] << 8) | span[offset++];
             extra = span[offset..(offset + extraLen)].ToArray();
@@ -179,7 +170,7 @@ public class RemoteClient : ISerializable
         }
 
         byte[]? publicExtra = null;
-        if (hasPublicExtra)
+        if (flags.HasFlag(EPartFlag.HasPublicExtra))
         {
             var publicExtraLen = (span[offset++] << 8) | span[offset++];
             publicExtra = span[offset..(offset + publicExtraLen)].ToArray();
@@ -187,7 +178,7 @@ public class RemoteClient : ISerializable
         }
 
         string[]? tags = null;
-        if (hasTags)
+        if (flags.HasFlag(EPartFlag.HasTags))
         {
             var tagsNumber = (span[offset++] << 8) | span[offset++];
             tags = new string[tagsNumber];

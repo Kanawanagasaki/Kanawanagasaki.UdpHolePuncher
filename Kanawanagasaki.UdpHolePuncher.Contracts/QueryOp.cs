@@ -21,10 +21,9 @@ public class QueryOp : ISerializable
     public void Serialize(Span<byte> span)
     {
         var hasTags = Tags is not null;
+        var offset = 0;
 
-        span[0] = (byte)(hasTags ? 0b00001000 : 0);
-
-        var offset = 1;
+        span[offset++] = (byte)(hasTags ? EPartFlag.HasTags : EPartFlag.None);
 
         var projectLen = Encoding.UTF8.GetByteCount(Project);
         span[offset++] = (byte)((projectLen >> 8) & 0xFF);
@@ -56,16 +55,16 @@ public class QueryOp : ISerializable
 
     public static QueryOp Deserialize(ReadOnlySpan<byte> span)
     {
-        var hasTags = (span[0] & 0b00001000) != 0;
+        var offset = 0;
 
-        var offset = 1;
+        var flags = (EPartFlag)span[offset++];
 
         var projectLen = (span[offset++] << 8) | span[offset++];
         var project = Encoding.UTF8.GetString(span[offset..(offset + projectLen)]);
         offset += projectLen;
 
         string[]? tags = null;
-        if (hasTags)
+        if (flags.HasFlag(EPartFlag.HasTags))
         {
             var tagsNumber = (span[offset++] << 8) | span[offset++];
             tags = new string[tagsNumber];

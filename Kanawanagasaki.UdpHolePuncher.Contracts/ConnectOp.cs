@@ -16,7 +16,7 @@ public class ConnectOp : ISerializable
     {
         var offset = 0;
 
-        span[offset++] = (byte)(Password is not null ? 0b00100000 : 0);
+        span[offset++] = (byte)(Password is not null ? EPartFlag.HasPassword : EPartFlag.None);
 
         Uuid.TryWriteBytes(span[offset..(offset + 16)]);
         offset += 16;
@@ -33,16 +33,15 @@ public class ConnectOp : ISerializable
 
     public static ConnectOp Deserialize(ReadOnlySpan<byte> span)
     {
-        var hasPassword = (span[0] & 0b00100000) != 0;
+        var offset = 0;
 
-        var offset = 1;
+        var flags = (EPartFlag)span[offset++];
 
         var uuid = span[offset..(offset + 16)];
         offset += uuid.Length;
 
-
         string? password = null;
-        if (hasPassword)
+        if (flags.HasFlag(EPartFlag.HasPassword))
         {
             var passwordLen = (span[offset++] << 8) | span[offset++];
             password = Encoding.UTF8.GetString(span[offset..(offset + passwordLen)]);
